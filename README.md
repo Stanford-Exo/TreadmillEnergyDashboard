@@ -33,7 +33,7 @@ If the user is wearing an exoskeleton, that exoskeleton will likely have joint e
 
 ## Methods to Lower Bound Metabolic Cost (mhich are Real-Time and Interpretable)
 
-We have several options to lower bound metabolic cost, ranging from loose conservative lower bounds to tighter but more approximate lower bounds.
+We have several options to lower bound metabolic cost.
 
 As a rough unit conversion, we will say that:
 - 1 Joule of negative mechanical work done in a muscle costs 1 Joule of chemical energy
@@ -49,6 +49,16 @@ We can assume that net negative human work (after subtracting out exo work) at/a
 
 If there is no Achilles tendon storage, because the ankle is experimentally immobilized, then we can assume that all positive and negative net human work (after subtracting out exo work) is coming from muscles, and compute a metabolic lower bound.
 
-### Aggressive lower bound: add estimated costs for holding static muscle contraction
+### Messy unitless non-linear lower bound: implied biological joint torques
 
-We can attempt a very approximate fit of static muscle contraction costs, which we can add to our dynamic muscle cost estimates. This penalizes static holding torques at the joints, which require static muscle contraction. Estimating this requires more information about the joint angles and dynamics, which requires additional sensors beyond the treadmill. If these sensors are not available, we cannot make this estimate.
+We know that static muscle contractions cost metabolic energy. While the exact mapping between static loads and metabolic costs is messy, we know there is a general relationship between biological joint torques (at least at the knees and hips) and muscle contractions. The ankle is a more complicated story, because of the Achilles tendon.
+
+All we need is a safeguard lower bound metric to prevent the dashboard from incorrectly estimating that something like "crouch gait" which requires large static holding torques at the joints could be energentically efficient, just because there is little power flowing in and out of the human. While computing full dynamic torques at each joint requires a detailed physical simulation, which requires full motion capture and fitting a detailed dynamics model of the subject, we do not actually need the full dynamic torques. We already capture the power rates at the joints with the treadmill lower bounds.
+
+To develop our "static muscle contraction" lower-bound metric, we will simply use the GRF crossed with the moment arm from the CoP to the joint center, taking a sum over magnitude of torques at both knees and both hips. This is a lower bound, because the conditional only runs one direction: If this quantity is not zero, we can say that muscle contraction is required at the hips or knees. If it is zero, we cannot necessarily say that the muscles are not co-contracting and wasting energy anyways.
+
+Doing this requires placing marker triads at known locations relative to the joint centers, so this is an optional metric, but is nice to have.
+
+### Joint lower-bound optimization: minimize the energy lower bound and the joint torque lower bound, and let the human relax over time
+
+We cannot control co-contraction and heart rate changes and other metabolic cost contributors from stress and effort. However, we can directly understand and minimize the contributions to metabolic cost from muscle power and non-tendon static torque sources, which we treat as lower bounds on total user effort.
