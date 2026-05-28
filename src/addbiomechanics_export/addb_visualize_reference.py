@@ -24,7 +24,7 @@ async def process_grf_data():
     # Define the dataset and data loader
     base_dir = '/Users/keenonwerling/Desktop/data/addb_dataset_publication/'
 
-    geometry_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), './Geometry') + '/'
+    geometry_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../Geometry') + '/'
 
     # List all the B3D files under the standardized folder
     raw_files: List[str] = []
@@ -89,6 +89,12 @@ async def process_grf_data():
         left_tibia = skel.getBodyNode('tibia_l')
         right_tibia = skel.getBodyNode('tibia_r')
 
+        for i in range(skel.getNumJoints()):
+            joint = skel.getJoint(i)
+            print(f'Joint {i}: {joint.getName()}')
+
+        left_knee = skel.getJoint('walker_knee_l')
+
         for trial in range(subject.getNumTrials()):
             if not keep_running:
                 break
@@ -111,6 +117,15 @@ async def process_grf_data():
                 pos[3:6] = 0.0
                 skel.setPositions(pos)
                 gui.nativeAPI().renderSkeleton(skel)
+
+                com = skel.getCOM()
+                com_velocity = skel.getCOMLinearVelocity()
+                com_acceleration = skel.getCOMLinearAcceleration()
+
+                left_joint_pos = skel.getJointWorldPositions([left_knee])
+
+                gui.nativeAPI().createSphere('com', 0.05 * np.ones(3), com, np.array([1.0, 1.0, 0.0, 1.0]))
+                gui.nativeAPI().createSphere('left_knee', 0.05 * np.ones(3), left_joint_pos, np.array([1.0, 0.0, 1.0, 1.0]))
 
                 smoothed_pass = frame.processingPasses[1]
                 forces = smoothed_pass.groundContactForce
