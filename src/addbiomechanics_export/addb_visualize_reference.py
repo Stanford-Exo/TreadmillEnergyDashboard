@@ -129,6 +129,9 @@ async def process_grf_data():
 
                 smoothed_pass = frame.processingPasses[1]
                 forces = smoothed_pass.groundContactForce
+                cop = smoothed_pass.groundContactCenterOfPressure
+                torque = smoothed_pass.groundContactTorque
+
                 body_form_norms = []
                 for i in range(int(len(forces) / 3)):
                     body_form_norms.append(np.linalg.norm(forces[i * 3:i * 3 + 3]))
