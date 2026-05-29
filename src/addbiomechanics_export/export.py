@@ -241,6 +241,27 @@ def export_subject_data(file_path: str, geometry_dir: str):
             print(f"  Skipping Trial {trial}: missing GRF elements detected in frame sequence")
             continue
 
+        # Constraint 4: Skip trials with no meaningful horizontal GRF measurements (X or Z axes)
+        # We require at least one frame in the trial to have absolute force > 1.0 N on a horizontal axis.
+        has_horizontal_grf = False
+        for frame in frames:
+            smoothed_pass = frame.processingPasses[-1]
+            forces = smoothed_pass.groundContactForce
+            for i in range(len(contact_bodies)):
+                idx = i * 3
+                if idx + 2 < len(forces):
+                    fx = forces[idx]       # Anteroposterior force (X)
+                    fz = forces[idx + 2]   # Mediolateral force (Z)
+                    if abs(fx) > 1.0 or abs(fz) > 1.0:
+                        has_horizontal_grf = True
+                        break
+            if has_horizontal_grf:
+                break
+
+        if not has_horizontal_grf:
+            print(f"  Skipping Trial {trial}: no meaningful horizontal GRF measurements detected (X or Z axes).")
+            continue
+
         trial_name = subject.getTrialName(trial) or f"trial_{trial}"
         base_name, segment_idx = parse_trial_segment(trial_name)
         print(f"  Trial {trial} ({trial_name}): passed initial criteria. Extracting (Base: '{base_name}', Segment: {segment_idx})...")
@@ -259,8 +280,10 @@ def export_subject_data(file_path: str, geometry_dir: str):
             skel.setVelocities(smoothed_pass.vel)
             skel.setAccelerations(smoothed_pass.acc)
 
-            com_pos = smoothed_pass.comPos
-            com_vel = smoothed_pass.comVel
+            # com_pos = smoothed_pass.comPos
+            # com_vel = smoothed_pass.comVel
+            com_pos = skel.getCOM()
+            com_vel = skel.getCOMLinearVelocity()
             com_acc = skel.getCOMLinearAcceleration()
 
             forces = smoothed_pass.groundContactForce
