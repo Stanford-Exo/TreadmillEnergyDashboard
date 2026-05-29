@@ -31,6 +31,28 @@ In practice, the negative work at heelstrike seems to actually be muscles doing 
 
 If the user is wearing an exoskeleton, that exoskeleton will likely have joint encoders and force/torque sensors, where it will be possible to estimate the instantaneous power of the exoskeleton. If exoskeleton power is available, then we have the power rates at both "ports" to the human: the treadmill, and the exoskeleton. That means that we can compute the internal power of the human. We know that the integral of the human + exoskeleton power over a stride must equal 0 (assuming flat ground, fixed pace). That implies that net positive power by an exoskeleton is going to force net negative power from a human, and vice versa.
 
+## Identifying which Joints Are Active
+
+In order to source or sink power at a joint, it must be moving.
+
+To do this, we must estimate the joint's velocity. There are several ways to do this, with varying accuracy.
+
+### Phase Based Estimates
+
+We can just assume that the user's gait is "standard", and estimate joint velocities based on phases.
+
+### Lookup Table Estimates
+
+Better than phases, we can lookup gait cycles based on their GRF/CoP pattern similarity to the AddBiomechanics data, and estimate joint velocities based on that.
+
+### Joint Encoders
+
+If exoskeletons come with joint encoders, we can use those to fine-tune estimates for particular joints, and also to refine our lookup table estimates above.
+
+### Mocap
+
+If we have live mocap (from scaled triads with distance signatures to ID them), we can of course use that.
+
 ## Methods to Lower Bound Metabolic Cost (mhich are Real-Time and Interpretable)
 
 We have several options to lower bound metabolic cost.
