@@ -54,14 +54,14 @@ def run_validation_on_file(file_path):
 
     # Approximate subject mass from vertical forces to initialize the filter:
     # m = Mean(Fz) / g (only considering frames with active ground force)
-    active_fz = f_total_z[f_total_z > 50.0]
+    active_fz = f_total_y[f_total_y > 50.0]
     if len(active_fz) > 0:
-        calculated_mass = np.mean(active_fz) / 9.81
+        calculated_mass = np.mean(f_total_y) / 9.81
     else:
         calculated_mass = 70.0  # Fallback guess
 
     # Initialize 9D Kalman Filter
-    kf = ComKalmanFilter(initial_mass=calculated_mass, pos_std=0.1, vel_std=0.1)
+    kf = ComKalmanFilter(initial_mass=calculated_mass)
 
     # Placeholders for estimations
     est_vel_x = []
