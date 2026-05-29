@@ -1,6 +1,7 @@
 import os
 import sys
 import re
+import itertools
 from pathlib import Path
 import numpy as np
 import nimblephysics as nimble
@@ -227,7 +228,7 @@ def export_subject_data(file_path: str, geometry_dir: str):
         if trial_len == 0:
             continue
 
-        frames = subject.readFrames(trial, 0, trial_len, includeSensorData=False, includeProcessingPasses=True)
+        frames = subject.readFrames(trial, 0, trial_len, includeSensorData=True, includeProcessingPasses=True)
         dt = subject.getTrialTimestep(trial)
 
         # Constraint 3: Verify that all frames have valid GRF data
@@ -245,7 +246,7 @@ def export_subject_data(file_path: str, geometry_dir: str):
         # We require at least one frame in the trial to have absolute force > 1.0 N on a horizontal axis.
         has_horizontal_grf = False
         for frame in frames:
-            raw_pass = frame.processingPasses[0]
+            raw_pass = frame.processingPasses[1]
             forces = raw_pass.groundContactForce
             for i in range(len(contact_bodies)):
                 idx = i * 3
@@ -266,6 +267,82 @@ def export_subject_data(file_path: str, geometry_dir: str):
         base_name, segment_idx = parse_trial_segment(trial_name)
         print(f"  Trial {trial} ({trial_name}): passed initial criteria. Extracting (Base: '{base_name}', Segment: {segment_idx})...")
 
+        # --- Pre-processing: Assign raw force plates to contact bodies based on average distance ---
+        num_force_plates = subject.getNumForcePlates(trial)
+        mapping = {}
+
+        if num_force_plates > 0 and len(contact_bodies) > 0:
+            foot_plate_distances = {cb: [0.0] * num_force_plates for cb in contact_bodies}
+            foot_plate_counts = {cb: [0] * num_force_plates for cb in contact_bodies}
+
+            for frame_data in frames:
+                smoothed_pass = frame_data.processingPasses[-1]
+                skel.setPositions(smoothed_pass.pos)
+
+                foot_pos = {}
+                for cb in contact_bodies:
+                    try:
+                        node = skel.getBodyNode(cb)
+                        foot_pos[cb] = node.getWorldTransform().translation()
+                    except Exception:
+                        foot_pos[cb] = None
+
+                for p in range(num_force_plates):
+                    if p < len(frame_data.rawForcePlateForces) and p < len(frame_data.rawForcePlateCenterOfPressures):
+                        force = frame_data.rawForcePlateForces[p]
+                        cop = frame_data.rawForcePlateCenterOfPressures[p]
+
+                        # Only use frames where force is significant to avoid noisy/unloaded CoP coordinates
+                        if np.linalg.norm(force) > 30.0:
+                            for cb in contact_bodies:
+                                if foot_pos[cb] is not None:
+                                    dist = np.linalg.norm(foot_pos[cb] - cop)
+                                    foot_plate_distances[cb][p] += dist
+                                    foot_plate_counts[cb][p] += 1
+
+            # Compute average distances for active frames
+            avg_dist = {}
+            for cb in contact_bodies:
+                avg_dist[cb] = []
+                for p in range(num_force_plates):
+                    count = foot_plate_counts[cb][p]
+                    if count > 0:
+                        avg_dist[cb].append(foot_plate_distances[cb][p] / count)
+                    else:
+                        avg_dist[cb].append(float('inf'))
+
+            # Resolve optimal 1-to-1 matching using permutations to assign each foot uniquely
+            best_mapping = {}
+            min_sum_dist = float('inf')
+
+            plates = list(range(num_force_plates))
+            if len(plates) >= len(contact_bodies):
+                for perm in itertools.permutations(plates, len(contact_bodies)):
+                    current_sum = 0.0
+                    for cb_idx, cb in enumerate(contact_bodies):
+                        p = perm[cb_idx]
+                        d = avg_dist[cb][p]
+                        if d == float('inf'):
+                            current_sum += 10.0  # Large default distance penalty
+                        else:
+                            current_sum += d
+                    if current_sum < min_sum_dist:
+                        min_sum_dist = current_sum
+                        best_mapping = {cb: perm[cb_idx] for cb_idx, cb in enumerate(contact_bodies)}
+            else:
+                # Fallback: independent minimal distance match
+                for cb in contact_bodies:
+                    best_p = 0
+                    best_d = float('inf')
+                    for p in range(num_force_plates):
+                        if avg_dist[cb][p] < best_d:
+                            best_d = avg_dist[cb][p]
+                            best_p = p
+                    best_mapping[cb] = best_p
+
+            mapping = best_mapping
+            print(f"  Trial {trial} mapped force plates: {mapping}")
+
         com_rows = []
         trq_rows = []
         render_rows = []
@@ -276,7 +353,7 @@ def export_subject_data(file_path: str, geometry_dir: str):
             
             # Select the last processing pass
             smoothed_pass = frame_data.processingPasses[-1]
-            raw_pass = frame_data.processingPasses[0]
+            raw_pass = frame_data.processingPasses[1]
             skel.setPositions(smoothed_pass.pos)
             skel.setVelocities(smoothed_pass.vel)
             skel.setAccelerations(smoothed_pass.acc)
@@ -290,11 +367,34 @@ def export_subject_data(file_path: str, geometry_dir: str):
             torques = raw_pass.groundContactTorque
 
             grf_data = []
-            for i in range(len(contact_bodies)):
-                idx = i * 3
-                body_force = forces[idx:idx+3] if idx < len(forces) else np.zeros(3)
-                body_cop = cops[idx:idx+3] if idx < len(cops) else np.zeros(3)
-                body_torque = torques[idx:idx+3] if idx < len(torques) else np.zeros(3)
+            for i, cb in enumerate(contact_bodies):
+                body_force = np.zeros(3)
+                body_cop = np.zeros(3)
+                body_torque = np.zeros(3)
+
+                if cb in mapping:
+                    p = mapping[cb]
+                    if p < len(frame_data.rawForcePlateForces):
+                        body_force = frame_data.rawForcePlateForces[p]
+                    if p < len(frame_data.rawForcePlateCenterOfPressures):
+                        body_cop = frame_data.rawForcePlateCenterOfPressures[p]
+                    if hasattr(frame_data, 'rawForcePlateTorques') and p < len(frame_data.rawForcePlateTorques):
+                        body_torque = frame_data.rawForcePlateTorques[p]
+                    else:
+                        # Fallback for torque to processed ground contact torques if raw force plate torque is missing
+                        idx = i * 3
+                        if idx < len(torques):
+                            body_torque = torques[idx:idx+3]
+                else:
+                    # Generic fallback using original index ordering
+                    idx = i * 3
+                    if idx < len(forces):
+                        body_force = forces[idx:idx+3]
+                    if idx < len(cops):
+                        body_cop = cops[idx:idx+3]
+                    if idx < len(torques):
+                        body_torque = torques[idx:idx+3]
+
                 grf_data.extend([
                     body_force[0], body_force[1], body_force[2],
                     body_cop[0], body_cop[1], body_cop[2],
@@ -375,7 +475,7 @@ def export_subject_data(file_path: str, geometry_dir: str):
                 total_frames += 1
                 cumulative_time += dt
 
-        # Target constraint: Skip and discard trials below 4000 total frames
+        # Target constraint: Skip and discard trials below 3000 total frames
         if total_frames < 3000:
             print(f"  Skipping unified trial '{base_name}': total frames ({total_frames}) is less than 3000 frame limit.")
             continue
@@ -439,9 +539,6 @@ def main():
             continue
         if 'Carter' in b3d_file:
             print(f"  Skipping {b3d_file}: identified as Carter dataset (no horizontal GRF).")
-            continue
-        if 'vanderZee' in b3d_file:
-            print(f"  Skipping {b3d_file}: identified as VanderZee dataset (strange horizontal GRF bugs).")
             continue
         export_subject_data(b3d_file, GEOMETRY_FOLDER)
 
