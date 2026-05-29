@@ -3,7 +3,7 @@ import numpy as np
 class ComKalmanFilter:
     """
     A 9D Kalman Filter to estimate Center of Mass (COM) excursion, velocity,
-    inverse mass, and 2D force plate tilt angles (pitch and roll).
+    inverse mass, and 2D force plate tilt angles (pitch and roll) with gravity oriented on the Y-axis.
     """
     def __init__(self, 
                  initial_mass=70.0, 
@@ -41,10 +41,12 @@ class ComKalmanFilter:
 
     def _get_tilt_jacobian(self, F_m):
         F_mx, F_my, F_mz = F_m
+        # Jacobian with respect to state variables [phi_x, phi_z]
+        # where phi_x = w * theta_x, phi_z = w * theta_z
         return np.array([
-            [0.0, F_mz],
-            [-F_mz, 0.0],
-            [F_my, -F_mx]
+            [0.0, -F_my],
+            [-F_mz, F_mx],
+            [F_my, 0.0]
         ])
 
     def update(self, F_m, dt):
@@ -96,8 +98,8 @@ class ComKalmanFilter:
         w = self.x[6]
         if w == 0:
             return np.zeros(2)
-        phi_x, phi_y = self.x[7], self.x[8]
-        return np.array([phi_x / w, phi_y / w])
+        phi_x, phi_z = self.x[7], self.x[8]
+        return np.array([phi_x / w, phi_z / w])
 
     @property
     def com_excursion_covariance(self):
@@ -121,12 +123,12 @@ class ComKalmanFilter:
         if w <= 0:
             return np.eye(2) * float('inf')
         
-        phi_x, phi_y = self.x[7], self.x[8]
+        phi_x, phi_z = self.x[7], self.x[8]
         P_sub = self.P[6:9, 6:9]
         
         J = np.array([
             [-phi_x / (w ** 2), 1.0 / w, 0.0],
-            [-phi_y / (w ** 2), 0.0, 1.0 / w]
+            [-phi_z / (w ** 2), 0.0, 1.0 / w]
         ])
         
         return J @ P_sub @ J.T
