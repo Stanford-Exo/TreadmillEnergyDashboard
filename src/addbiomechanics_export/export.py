@@ -245,8 +245,8 @@ def export_subject_data(file_path: str, geometry_dir: str):
         # We require at least one frame in the trial to have absolute force > 1.0 N on a horizontal axis.
         has_horizontal_grf = False
         for frame in frames:
-            smoothed_pass = frame.processingPasses[-1]
-            forces = smoothed_pass.groundContactForce
+            raw_pass = frame.processingPasses[0]
+            forces = raw_pass.groundContactForce
             for i in range(len(contact_bodies)):
                 idx = i * 3
                 if idx + 2 < len(forces):
@@ -276,6 +276,7 @@ def export_subject_data(file_path: str, geometry_dir: str):
             
             # Select the last processing pass
             smoothed_pass = frame_data.processingPasses[-1]
+            raw_pass = frame_data.processingPasses[0]
             skel.setPositions(smoothed_pass.pos)
             skel.setVelocities(smoothed_pass.vel)
             skel.setAccelerations(smoothed_pass.acc)
@@ -286,9 +287,12 @@ def export_subject_data(file_path: str, geometry_dir: str):
             com_vel = skel.getCOMLinearVelocity()
             com_acc = skel.getCOMLinearAcceleration()
 
-            forces = smoothed_pass.groundContactForce
-            cops = smoothed_pass.groundContactCenterOfPressure
-            torques = smoothed_pass.groundContactTorque
+            # forces = smoothed_pass.groundContactForce
+            # cops = smoothed_pass.groundContactCenterOfPressure
+            # torques = smoothed_pass.groundContactTorque
+            forces = raw_pass.groundContactForce
+            cops = raw_pass.groundContactCenterOfPressure
+            torques = raw_pass.groundContactTorque
 
             grf_data = []
             for i in range(len(contact_bodies)):
@@ -428,6 +432,12 @@ def main():
 
     print(f"Found {len(b3d_files)} B3D files. Starting export...")
     for b3d_file in b3d_files:
+        if 'Fregly' in b3d_file:
+            print(f"  Skipping {b3d_file}: identified as Fregly dataset (not compatible with current export process).")
+            continue
+        if 'Carter' in b3d_file:
+            print(f"  Skipping {b3d_file}: identified as Carter dataset (no horizontal GRF).")
+            continue
         export_subject_data(b3d_file, GEOMETRY_FOLDER)
 
     print("\nProcess completed.")
