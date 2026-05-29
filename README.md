@@ -86,3 +86,72 @@ Doing this requires placing marker triads at known locations relative to the joi
 ### Joint lower-bound optimization: minimize the energy lower bound and the joint torque lower bound, and let the human relax over time
 
 We cannot control co-contraction and heart rate changes and other metabolic cost contributors from stress and effort. However, we can directly understand and minimize the contributions to metabolic cost from muscle power and non-tendon static torque sources, which we treat as lower bounds on total user effort.
+
+## System Architecture & Operational Modes
+
+To support both real-time clinical testing and offline academic study, the Treadmill Energy Dashboard uses a unified analysis core written in Python. The estimation, segmentation, and biomechanical algorithms are shared directly between the live dashboard server and the offline batch-processing tools. This code reuse keeps the codebase simple and ensures that real-time estimates match offline validation metrics.
+
+The software operates in three primary modes:
+
+### 1. Live Streaming & Recording Mode
+This mode is used during active collection trials to provide immediate feedback and log synchronized data.
+* **Multi-Stream Ingestion:** Receives high-frequency force plate data (GRF and CoP) via network protocols (TCP/UDP) or serial ports, alongside live streams of exoskeleton telemetry (joint angles, commanded torques, power) and metabolic mask readings (breath-by-breath gas exchange).
+* **Synchronized Recording:** Packages all incoming streams—forces, exoskeleton states, and metabolics—into a unified, time-synced format saved to disk for future analysis.
+* **Hardware Mocking:** Can read a previously recorded session and stream it to the dashboard at its original frequency, allowing researchers to dry-run experimental protocols under identical UI conditions.
+
+### 2. Replay & Interactive Review Mode
+This mode allows researchers to review recorded datasets with the exact same visual indicators as a live session.
+* **Playback Controls:** The top of the dashboard displays a file selector, play/pause controls, and a timeline progress scrubber to navigate the trial.
+* **Identical Downstream Analysis:** As the scrubber moves, the dashboard recomputes and updates all aggregate stride statistics, modeling curves, and lower-bound estimates in the panels below.
+
+### 3. Offline Batch Analysis & Validation Mode
+This mode automates the processing of entire directories of trials (such as exported AddBiomechanics datasets or historical laboratory sessions) for group studies.
+* **Ground-Truth Comparison:** If the input files contain optical motion capture or reconstructed kinematics, the system automatically compares the dashboard's estimators (such as the COM Kalman Filter or joint position estimators) against these reference values.
+* **Statistical Reporting:** Generates validation plots showing error distributions, parameter convergence, and correlation coefficients to evaluate the reliability of the simplified, force-plate-based metrics.
+
+---
+
+## Dashboard Interface Structure
+
+The web interface is split into a real-time tracking area at the top and an aggregate analysis area at the bottom. This layout is identical in both Live and Replay modes.
+
+```
++─────────────────────────────────────────────────────────────+
+|  [File Selector / Play / Pause / Scrubber]                  |
+|  +─────────────────────────+  +──────────────────────────+  |
+|  |       3D Viewer         |  |    Live Rolling Plots    |  |
+|  |  (COM, GRFs, Ghosts)    |  | (Forces, Exo, Met, Pwr)  |  |
+|  +─────────────────────────+  +──────────────────────────+  |
++─────────────────────────────────────────────────────────────+
+|                  AGGREGATE ANALYSIS AREA                    |
+|                                                             |
+|  +─────────────────────────+  +──────────────────────────+  |
+|  | Stride-Average Power    |  | Metabolic Sensitivity    |  |
+|  | (With CSV Download)     |  | (With CSV Download)      |  |
+|  +─────────────────────────+  +──────────────────────────+  |
+|  | Waterbed Sensitivity Map|  | Validation Plots         |  |
+|  | (Interactive Shifts)    |  | (If Ground Truth Exist)  |  |
+|  +─────────────────────────+  +──────────────────────────+  |
++─────────────────────────────────────────────────────────────+
+```
+
+### Top Panel: Real-Time Visualization & Streams
+* **3D WebGL Viewer:** Displays a continuous spatial representation of the subject. It visualizes the recent COM trajectory path, active ground reaction force vectors, and estimated instantaneous power rates per foot. 
+* **Ghost Joints:** When experimental motion capture is unavailable, the viewer renders "ghost joints" (estimated joint center locations) obtained from a nearest-neighbor lookup table based on current GRF and CoP patterns matched against reference datasets.
+* **Live Rolling Plots:** Displays scrolling time-series plots of raw sensor readings, including vertical force components, exoskeleton encoder angles, and step-by-step metabolic rates.
+
+### Bottom Panel: Aggregate & Stride-Normalized Analysis
+As steps accumulate during a live walk—or as a user scrubs through a file in replay mode—the bottom portion of the screen dynamically updates the following analytical components:
+
+* **Stride-Average Power Curves:** Segments force and telemetry data into individual strides, normalized from 0% to 100% of the gait cycle. It plots the average power contribution of the treadmill and the exoskeleton, highlighting estimated phases of Achilles tendon elastic storage versus muscle work.
+* **Metabolic Linear Sensitivity Analysis:** Fits a linear regression model relating the $N$-bucket (default 100) stride power vector to the measured metabolic rate. It plots the resulting regression coefficients directly beneath the average stride curve, indicating which parts of the gait cycle are most sensitive to changes in mechanical power.
+* **Interactive Waterbed Effect Maps:** Allows users to select a region of the stride-normalized power curve (for either the human or the exoskeleton) and drag it up or down. The dashboard computes historical correlations across the dataset to render a dotted line showing how the rest of the gait cycle typically compensates for that change.
+* **Validation Plots:** If the underlying dataset contains ground-truth COM trajectories or optical joint centers, this section displays accuracy plots mapping estimated values against the reference metrics over time.
+
+---
+
+## Offline Data Export & Publishing
+
+To allow researchers to generate publication-quality figures using external tools (such as MATLAB, Python's matplotlib, or R), every plotting component in the aggregate analysis area includes a **Save/Download CSV** button. 
+
+Clicking this button exports the current active data series of the plot—including average curves, confidence intervals, regression coefficients, and validation errors—into a clean, tabular CSV format. This ensures that any data visualized on the dashboard can be directly extracted, audited, and formatted offline.
