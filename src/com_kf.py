@@ -37,7 +37,7 @@ class ComKalmanFilter:
         self.Q[7:9, 7:9] = np.eye(2) * proc_noise_phi
 
         self.R = np.eye(3) * (meas_std ** 2)
-        self.g = np.array([0.0, 0.0, -9.81])
+        self.g = np.array([0.0, -9.81, 0.0])
 
     def _get_tilt_jacobian(self, F_m):
         F_mx, F_my, F_mz = F_m
