@@ -1,7 +1,7 @@
 # Variables
 PYTHON = python3
 
-.PHONY: test clean validate export
+.PHONY: test clean validate validate-strides export
 
 # GNU Make pattern to capture trailing targets and translate them into flags.
 # This allows running: make validate plot
@@ -15,6 +15,18 @@ ifeq (validate,$(firstword $(MAKECMDGOALS)))
   $(eval $(VALIDATE_ARGS):;@:)
 endif
 
+# Capture trailing targets for validate-strides.
+# This allows running: make validate-strides plot
+ifeq (validate-strides,$(firstword $(MAKECMDGOALS)))
+  STRIDES_ARGS := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
+  
+  # Translate positional target words to script flags (e.g., 'plot' -> '--plot')
+  STRIDES_FLAGS := $(subst plot,--plot,$(STRIDES_ARGS))
+  
+  # Turn trailing arguments into empty do-nothing targets to prevent "No rule to make target" errors
+  $(eval $(STRIDES_ARGS):;@:)
+endif
+
 # Run all unit tests inside the test directory
 test:
 	PYTHONPATH=src $(PYTHON) -m unittest discover -s test -p "test_*.py"
@@ -23,9 +35,9 @@ test:
 validate:
 	PYTHONPATH=src $(PYTHON) -m validation.validate_kf $(VALIDATE_FLAGS)
 
-# Run the stride segmentation and energy aggregation validation
+# Run stride-based gait segmentation and energy aggregation
 validate-strides:
-	PYTHONPATH=src $(PYTHON) -m validation.validate_strides --plot
+	PYTHONPATH=src $(PYTHON) -m validation.validate_strides $(STRIDES_FLAGS)
 
 # Run the AddBiomechanics data exporter
 export:
