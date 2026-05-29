@@ -25,6 +25,8 @@ COM_VAL_DIR = os.path.join(OUTPUT_DIR, 'com_validation')
 TORQUE_VAL_DIR = os.path.join(OUTPUT_DIR, 'torque_validation')
 RENDERING_DIR = os.path.join(OUTPUT_DIR, 'rendering')
 
+EDGE_TRIM_FRAMES = 1
+
 # Ensure target directories exist
 os.makedirs(COM_VAL_DIR, exist_ok=True)
 os.makedirs(TORQUE_VAL_DIR, exist_ok=True)
@@ -69,8 +71,49 @@ def parse_trial_segment(trial_name: str):
         return base_name, segment_idx
     return trial_name, 0
 
+def interpolate_boundaries(df, segment_lengths, W):
+    """
+    Linearly interpolates data columns across segment boundaries in a consolidated DataFrame.
+    
+    Leaves index 0 ('frame') and index 1 ('time') untouched to avoid type mismatches
+    and pandas FutureWarning warnings.
+    """
+    if len(segment_lengths) <= 1:
+        return df
+
+    # Find row indices of the segment split boundaries
+    split_points = []
+    current_sum = 0
+    for length in segment_lengths[:-1]:
+        current_sum += length
+        split_points.append(current_sum)
+
+    df_copy = df.copy()
+
+    for split in split_points:
+        idx_start = split - W - 1
+        idx_end = split + W
+
+        # Safety boundary check
+        if idx_start < 0 or idx_end >= len(df_copy):
+            continue
+
+        # Interpolate only from column index 2 onwards (ignoring 'frame' and 'time')
+        val_start = df_copy.iloc[idx_start, 2:].values.astype(float)
+        val_end = df_copy.iloc[idx_end, 2:].values.astype(float)
+        num_steps = idx_end - idx_start
+
+        for step in range(1, num_steps):
+            alpha = step / num_steps
+            interpolated_data = (1.0 - alpha) * val_start + alpha * val_end
+            
+            # Assign strictly to the floating-point data columns
+            df_copy.iloc[idx_start + step, 2:] = interpolated_data
+
+    return df_copy
+
 def export_subject_data(file_path: str, geometry_dir: str):
-    """Processes a B3D file and exports filtered and concatenated splits as Parquet files."""
+    """Processes a B3D file, reconstructs split trials, blends boundary transients, and exports."""
     print(f"\nProcessing: {file_path}")
     subject_name = Path(file_path).stem
     
@@ -206,7 +249,7 @@ def export_subject_data(file_path: str, geometry_dir: str):
         trq_rows = []
         render_rows = []
 
-        # Extract frame metrics sequentially
+        # Extract frame metrics sequentially (all frames are exported; edge smoothing is handled at consolidation)
         for t in range(len(frames)):
             frame_data = frames[t]
             
@@ -236,7 +279,6 @@ def export_subject_data(file_path: str, geometry_dir: str):
                     body_torque[0], body_torque[1], body_torque[2]
                 ])
 
-            # Store frame metrics; frame indices and timings will be filled globally during consolidation
             com_row = [
                 0, 0.0,
                 com_pos[0], com_pos[1], com_pos[2],
@@ -267,19 +309,31 @@ def export_subject_data(file_path: str, geometry_dir: str):
             trial_groups[base_name] = []
         trial_groups[base_name].append((segment_idx, com_rows, trq_rows, render_rows, dt))
 
-    # Consolidation and writing of aggregated trials
+    # Consolidation, boundary blending, and writing of aggregated trials
     for base_name, segments in trial_groups.items():
         # Sort segments based on segment_idx to guarantee chronological order
         segments.sort(key=lambda x: x[0])
 
+        # Verify segments are long enough to undergo boundary interpolation
+        valid_group = True
+        for _, com_rows, _, _, _ in segments:
+            if len(com_rows) < 2 * EDGE_TRIM_FRAMES + 2:
+                valid_group = False
+                break
+        if not valid_group:
+            print(f"  Skipping unified trial '{base_name}': one or more segments are too short for boundary blending.")
+            continue
+
         combined_com = []
         combined_trq = []
         combined_render = []
+        segment_lengths = []
 
         total_frames = 0
         cumulative_time = 0.0
 
         for segment_idx, com_rows, trq_rows, render_rows, dt in segments:
+            segment_lengths.append(len(com_rows))
             for idx in range(len(com_rows)):
                 r_com = com_rows[idx].copy()
                 r_com[0] = total_frames
@@ -309,15 +363,30 @@ def export_subject_data(file_path: str, geometry_dir: str):
         rendering_path = os.path.join(RENDERING_DIR, f"{subject_name}_{base_name}_rendering.parquet")
 
         df_com = pd.DataFrame(combined_com, columns=com_header)
-        df_com.to_parquet(com_val_path, index=False)
-
         df_trq = pd.DataFrame(combined_trq, columns=trq_header)
-        df_trq.to_parquet(torque_val_path, index=False)
-
         df_render = pd.DataFrame(combined_render, columns=render_header)
+
+        # 1. Linearly interpolate the inner segment boundary transitions to clean up artifacts
+        df_com = interpolate_boundaries(df_com, segment_lengths, EDGE_TRIM_FRAMES)
+        df_trq = interpolate_boundaries(df_trq, segment_lengths, EDGE_TRIM_FRAMES)
+        df_render = interpolate_boundaries(df_render, segment_lengths, EDGE_TRIM_FRAMES)
+
+        # 2. Trim the absolute outer boundaries of the consolidated dataset to drop start/end filter transients
+        df_com = df_com.iloc[EDGE_TRIM_FRAMES:-EDGE_TRIM_FRAMES].reset_index(drop=True)
+        df_trq = df_trq.iloc[EDGE_TRIM_FRAMES:-EDGE_TRIM_FRAMES].reset_index(drop=True)
+        df_render = df_render.iloc[EDGE_TRIM_FRAMES:-EDGE_TRIM_FRAMES].reset_index(drop=True)
+
+        # 3. Correct time and frame sequences to be perfectly sequential
+        dt = segments[0][4]
+        for df in [df_com, df_trq, df_render]:
+            df['frame'] = np.arange(len(df))
+            df['time'] = np.arange(len(df)) * dt
+
+        df_com.to_parquet(com_val_path, index=False)
+        df_trq.to_parquet(torque_val_path, index=False)
         df_render.to_parquet(rendering_path, index=False)
 
-        print(f"    Saved unified trial '{base_name}' ({total_frames} frames) ->")
+        print(f"    Saved consolidated & blended trial '{base_name}' ({len(df_com)} frames) ->")
         print(f"      {com_val_path}")
         print(f"      {torque_val_path}")
         print(f"      {rendering_path}")
