@@ -33,7 +33,9 @@ If the user is wearing an exoskeleton, that exoskeleton will likely have joint e
 
 ## Identifying which Joints Are Active
 
-In order to source or sink power at a joint, it must be moving.
+There are two reasons we want to estimate joint angles. For energy estimates, it is useful because in order to source or sink power at a joint, it must be moving. For static torque estimates, knowing the joint centers in relation to the CoP data allows us to compute cross products.
+
+The mystery of Achillese tendon energy flow (which is less metabolically expensive than other kinds of energy flow) can be partially constrained by knowing that Achillese storage requires active ankle dorsiflexion velocity, and return requires plantarflexion velocity. That limits the times that the Achillese can be responsible for observed energy flow.
 
 To do this, we must estimate the joint's velocity. There are several ways to do this, with varying accuracy.
 
