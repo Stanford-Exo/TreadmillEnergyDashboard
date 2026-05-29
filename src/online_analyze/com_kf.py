@@ -41,8 +41,6 @@ class ComKalmanFilter:
 
     def _get_tilt_jacobian(self, F_m):
         F_mx, F_my, F_mz = F_m
-        # Jacobian with respect to state variables [phi_x, phi_z]
-        # where phi_x = w * theta_x, phi_z = w * theta_z
         return np.array([
             [0.0, -F_my],
             [-F_mz, F_mx],

@@ -23,6 +23,10 @@ test:
 validate:
 	PYTHONPATH=src $(PYTHON) -m validation.validate_kf $(VALIDATE_FLAGS)
 
+# Run the stride segmentation and energy aggregation validation
+validate-strides:
+	PYTHONPATH=src $(PYTHON) -m validation.validate_strides --plot
+
 # Run the AddBiomechanics data exporter
 export:
 	PYTHONPATH=src $(PYTHON) -m addbiomechanics_export.export

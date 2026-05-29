@@ -6,7 +6,7 @@ import glob
 import argparse
 import numpy as np
 import pandas as pd
-from com_kf import ComKalmanFilter
+from online_analyze.com_kf import ComKalmanFilter
 
 # Setup optional plotting module
 try:
