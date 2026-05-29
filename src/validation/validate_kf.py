@@ -101,9 +101,9 @@ def run_validation_on_file(file_path):
     r_z = np.corrcoef(est_vel_z, gt_vel_z)[0, 1] if (np.std(est_vel_z) > 0 and np.std(gt_vel_z) > 0) else 0.0
 
     print(f"  Results (Velocity Evaluation):")
-    print(f"    - X (Anteroposterior) : RMSE = {rmse_x:.4f} m/s | Correlation (r) = {r_x:.4f}")
-    print(f"    - Y (Mediolateral)    : RMSE = {rmse_y:.4f} m/s | Correlation (r) = {r_y:.4f}")
-    print(f"    - Z (Vertical)        : RMSE = {rmse_z:.4f} m/s | Correlation (r) = {r_z:.4f}")
+    print(f"    - X            : RMSE = {rmse_x:.4f} m/s | Correlation (r) = {r_x:.4f}")
+    print(f"    - Y (Vertical) : RMSE = {rmse_y:.4f} m/s | Correlation (r) = {r_y:.4f}")
+    print(f"    - Z            : RMSE = {rmse_z:.4f} m/s | Correlation (r) = {r_z:.4f}")
 
     return {
         "file": os.path.basename(file_path),

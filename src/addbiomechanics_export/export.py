@@ -1,5 +1,6 @@
 import os
 import sys
+import re
 from pathlib import Path
 import numpy as np
 import nimblephysics as nimble
@@ -54,8 +55,22 @@ def get_b3d_files(base_path: str) -> list:
                 b3d_files.append(os.path.join(root, file))
     return b3d_files
 
+def parse_trial_segment(trial_name: str):
+    """Extracts base name and segment index from split trials.
+    
+    Example: "PDS26CR1_segment_2" -> ("PDS26CR1", 2)
+             "PDS26CR1" -> ("PDS26CR1", 0)
+    """
+    match = re.search(r"^(.*?)(?:_segment_(\d+))?$", trial_name, re.IGNORECASE)
+    if match:
+        base_name = match.group(1)
+        segment_num = match.group(2)
+        segment_idx = int(segment_num) if segment_num is not None else 0
+        return base_name, segment_idx
+    return trial_name, 0
+
 def export_subject_data(file_path: str, geometry_dir: str):
-    """Processes a B3D file and exports filtered splits as Parquet files."""
+    """Processes a B3D file and exports filtered and concatenated splits as Parquet files."""
     print(f"\nProcessing: {file_path}")
     subject_name = Path(file_path).stem
     
@@ -111,9 +126,48 @@ def export_subject_data(file_path: str, geometry_dir: str):
     raw_header = subject.getHeaderProto()
     raw_trials = list(raw_header.getTrials())
 
-    # Process trials within the subject file
+    # Define Headers
+    com_header = [
+        'frame', 'time',
+        'com_pos_x', 'com_pos_y', 'com_pos_z',
+        'com_vel_x', 'com_vel_y', 'com_vel_z',
+        'com_acc_x', 'com_acc_y', 'com_acc_z'
+    ]
+    for cb in contact_bodies:
+        com_header.extend([
+            f"{cb}_force_x", f"{cb}_force_y", f"{cb}_force_z",
+            f"{cb}_cop_x", f"{cb}_cop_y", f"{cb}_cop_z",
+            f"{cb}_torque_x", f"{cb}_torque_y", f"{cb}_torque_z"
+        ])
+
+    trq_header = ['frame', 'time']
+    for j_name in joint_names:
+        trq_header.extend([
+            f"joint_{j_name}_center_pos_x",
+            f"joint_{j_name}_center_pos_y",
+            f"joint_{j_name}_center_pos_z"
+        ])
+    for cb in contact_bodies:
+        trq_header.extend([
+            f"{cb}_force_x", f"{cb}_force_y", f"{cb}_force_z",
+            f"{cb}_cop_x", f"{cb}_cop_y", f"{cb}_cop_z",
+            f"{cb}_torque_x", f"{cb}_torque_y", f"{cb}_torque_z"
+        ])
+
+    render_header = ['frame', 'time']
+    for _, _, shape_name, _ in body_shapes:
+        render_header.extend([
+            f"{shape_name}_pos_x", f"{shape_name}_pos_y", f"{shape_name}_pos_z",
+            f"{shape_name}_rot_x", f"{shape_name}_rot_y", f"{shape_name}_rot_z"
+        ])
+
+    # Dictionary to store structured frame lists prior to concatenation:
+    # base_trial_name -> list of (segment_idx, com_rows, trq_rows, render_rows, dt)
+    trial_groups = {}
+
+    # Process individual trials/segments
     for trial in range(subject.getNumTrials()):
-        # Constraint 1: Keep only trials that are designated as TREADMILL
+        # Constraint 1: Keep only trials that are designated as TREADMILL or STATIC
         trial_type = raw_trials[trial].getBasicTrialType()
         print(f"  Trial {trial}: type is {trial_type}")
         if trial_type != nimble.biomechanics.BasicTrialType.TREADMILL and trial_type != nimble.biomechanics.BasicTrialType.STATIC_TRIAL:
@@ -143,74 +197,28 @@ def export_subject_data(file_path: str, geometry_dir: str):
         if has_missing_grf:
             print(f"  Skipping Trial {trial}: missing GRF elements detected in frame sequence")
             continue
-        print(f"  Trial {trial}: passed all constraints, exporting data...")
 
         trial_name = subject.getTrialName(trial) or f"trial_{trial}"
-        print(f"  Processing Trial: {trial_name} ({trial_len} frames)")
+        base_name, segment_idx = parse_trial_segment(trial_name)
+        print(f"  Trial {trial} ({trial_name}): passed initial criteria. Extracting (Base: '{base_name}', Segment: {segment_idx})...")
 
-        # Target Parquet output paths
-        com_val_path = os.path.join(COM_VAL_DIR, f"{subject_name}_{trial_name}_com_validation.parquet")
-        torque_val_path = os.path.join(TORQUE_VAL_DIR, f"{subject_name}_{trial_name}_torque_validation.parquet")
-        rendering_path = os.path.join(RENDERING_DIR, f"{subject_name}_{trial_name}_rendering.parquet")
-
-        # Define Headers
-        com_header = [
-            'frame', 'time',
-            'com_pos_x', 'com_pos_y', 'com_pos_z',
-            'com_vel_x', 'com_vel_y', 'com_vel_z',
-            'com_acc_x', 'com_acc_y', 'com_acc_z'
-        ]
-        for cb in contact_bodies:
-            com_header.extend([
-                f"{cb}_force_x", f"{cb}_force_y", f"{cb}_force_z",
-                f"{cb}_cop_x", f"{cb}_cop_y", f"{cb}_cop_z",
-                f"{cb}_torque_x", f"{cb}_torque_y", f"{cb}_torque_z"
-            ])
-
-        trq_header = ['frame', 'time']
-        for j_name in joint_names:
-            trq_header.extend([
-                f"joint_{j_name}_center_pos_x",
-                f"joint_{j_name}_center_pos_y",
-                f"joint_{j_name}_center_pos_z"
-            ])
-        for cb in contact_bodies:
-            trq_header.extend([
-                f"{cb}_force_x", f"{cb}_force_y", f"{cb}_force_z",
-                f"{cb}_cop_x", f"{cb}_cop_y", f"{cb}_cop_z",
-                f"{cb}_torque_x", f"{cb}_torque_y", f"{cb}_torque_z"
-            ])
-
-        render_header = ['frame', 'time']
-        for _, _, shape_name, _ in body_shapes:
-            render_header.extend([
-                f"{shape_name}_pos_x", f"{shape_name}_pos_y", f"{shape_name}_pos_z",
-                f"{shape_name}_rot_x", f"{shape_name}_rot_y", f"{shape_name}_rot_z"
-            ])
-
-        # Data rows buffers
         com_rows = []
         trq_rows = []
         render_rows = []
 
-        # Iterate through frame metrics
+        # Extract frame metrics sequentially
         for t in range(len(frames)):
             frame_data = frames[t]
-            time_val = t * dt
             
-            # Select the last processing pass (index 2)
+            # Select the last processing pass
             smoothed_pass = frame_data.processingPasses[-1]
             skel.setPositions(smoothed_pass.pos)
             skel.setVelocities(smoothed_pass.vel)
             skel.setAccelerations(smoothed_pass.acc)
 
-            # Retrieve untransformed kinematic metrics
-            # com_pos = skel.getCOM()
-            # com_vel = skel.getCOMLinearVelocity()
-            com_acc = skel.getCOMLinearAcceleration()
-
             com_pos = smoothed_pass.comPos
             com_vel = smoothed_pass.comVel
+            com_acc = skel.getCOMLinearAcceleration()
 
             forces = smoothed_pass.groundContactForce
             cops = smoothed_pass.groundContactCenterOfPressure
@@ -228,17 +236,16 @@ def export_subject_data(file_path: str, geometry_dir: str):
                     body_torque[0], body_torque[1], body_torque[2]
                 ])
 
-            # --- Row 1: COM Validation ---
+            # Store frame metrics; frame indices and timings will be filled globally during consolidation
             com_row = [
-                t, time_val,
+                0, 0.0,
                 com_pos[0], com_pos[1], com_pos[2],
                 com_vel[0], com_vel[1], com_vel[2],
                 com_acc[0], com_acc[1], com_acc[2]
             ] + grf_data
             com_rows.append(com_row)
 
-            # --- Row 2: Torque Validation ---
-            trq_row = [t, time_val]
+            trq_row = [0, 0.0]
             for joint in joints:
                 joint_world_pos = skel.getJointWorldPositions([joint])
                 joint_pos_vector = joint_world_pos[0] if isinstance(joint_world_pos, list) else joint_world_pos[:3]
@@ -246,8 +253,7 @@ def export_subject_data(file_path: str, geometry_dir: str):
             trq_row.extend(grf_data)
             trq_rows.append(trq_row)
 
-            # --- Row 3: Rendering ---
-            render_row = [t, time_val]
+            render_row = [0, 0.0]
             for _, _, _, shape_node in body_shapes:
                 world_transform = shape_node.getWorldTransform()
                 pos = world_transform.translation()
@@ -257,19 +263,64 @@ def export_subject_data(file_path: str, geometry_dir: str):
                 render_row.extend([pos[0], pos[1], pos[2], euler_angles[0], euler_angles[1], euler_angles[2]])
             render_rows.append(render_row)
 
-        # Convert buffers to DataFrames and save as Parquet files
-        df_com = pd.DataFrame(com_rows, columns=com_header)
+        if base_name not in trial_groups:
+            trial_groups[base_name] = []
+        trial_groups[base_name].append((segment_idx, com_rows, trq_rows, render_rows, dt))
+
+    # Consolidation and writing of aggregated trials
+    for base_name, segments in trial_groups.items():
+        # Sort segments based on segment_idx to guarantee chronological order
+        segments.sort(key=lambda x: x[0])
+
+        combined_com = []
+        combined_trq = []
+        combined_render = []
+
+        total_frames = 0
+        cumulative_time = 0.0
+
+        for segment_idx, com_rows, trq_rows, render_rows, dt in segments:
+            for idx in range(len(com_rows)):
+                r_com = com_rows[idx].copy()
+                r_com[0] = total_frames
+                r_com[1] = cumulative_time
+                combined_com.append(r_com)
+
+                r_trq = trq_rows[idx].copy()
+                r_trq[0] = total_frames
+                r_trq[1] = cumulative_time
+                combined_trq.append(r_trq)
+
+                r_render = render_rows[idx].copy()
+                r_render[0] = total_frames
+                r_render[1] = cumulative_time
+                combined_render.append(r_render)
+
+                total_frames += 1
+                cumulative_time += dt
+
+        # Target constraint: Skip and discard trials below 4000 total frames
+        if total_frames < 4000:
+            print(f"  Skipping unified trial '{base_name}': total frames ({total_frames}) is less than 4000 frame limit.")
+            continue
+
+        com_val_path = os.path.join(COM_VAL_DIR, f"{subject_name}_{base_name}_com_validation.parquet")
+        torque_val_path = os.path.join(TORQUE_VAL_DIR, f"{subject_name}_{base_name}_torque_validation.parquet")
+        rendering_path = os.path.join(RENDERING_DIR, f"{subject_name}_{base_name}_rendering.parquet")
+
+        df_com = pd.DataFrame(combined_com, columns=com_header)
         df_com.to_parquet(com_val_path, index=False)
 
-        df_trq = pd.DataFrame(trq_rows, columns=trq_header)
+        df_trq = pd.DataFrame(combined_trq, columns=trq_header)
         df_trq.to_parquet(torque_val_path, index=False)
 
-        df_render = pd.DataFrame(render_rows, columns=render_header)
+        df_render = pd.DataFrame(combined_render, columns=render_header)
         df_render.to_parquet(rendering_path, index=False)
 
-        print(f"    Saved -> {com_val_path}")
-        print(f"    Saved -> {torque_val_path}")
-        print(f"    Saved -> {rendering_path}")
+        print(f"    Saved unified trial '{base_name}' ({total_frames} frames) ->")
+        print(f"      {com_val_path}")
+        print(f"      {torque_val_path}")
+        print(f"      {rendering_path}")
 
 
 def main():
