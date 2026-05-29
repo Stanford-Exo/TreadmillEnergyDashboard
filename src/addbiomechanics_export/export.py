@@ -376,8 +376,8 @@ def export_subject_data(file_path: str, geometry_dir: str):
                 cumulative_time += dt
 
         # Target constraint: Skip and discard trials below 4000 total frames
-        if total_frames < 4000:
-            print(f"  Skipping unified trial '{base_name}': total frames ({total_frames}) is less than 4000 frame limit.")
+        if total_frames < 3000:
+            print(f"  Skipping unified trial '{base_name}': total frames ({total_frames}) is less than 3000 frame limit.")
             continue
 
         com_val_path = os.path.join(COM_VAL_DIR, f"{subject_name}_{base_name}_com_validation.parquet")
