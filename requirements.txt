@@ -1,0 +1,10 @@
+fastapi>=0.100.0
+uvicorn>=0.22.0
+websockets>=11.0
+numpy>=1.22.0
+pandas>=1.4.0
+pyarrow>=8.0.0
+scipy>=1.8.0
+scikit-learn>=1.0.0
+matplotlib>=3.5.0
+pyperclip>=1.8.2

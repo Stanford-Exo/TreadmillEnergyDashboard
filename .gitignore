@@ -1,9 +1,69 @@
-__pycache__
-*.pyc
-*.pyo
+# ==============================================================================
+# System & IDE Metadata
+# ==============================================================================
 .DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# ==============================================================================
+# Python Backend
+# ==============================================================================
+# Virtual environment
+venv/
+env/
+ENV/
+.env
+
+# Cache and compiled bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Performance metrics and logs
+wandb/
 *.log
-*.csv
-Geometry/
-apply_fixes.py
+
+# ==============================================================================
+# Biomechanics Data & Heavy Assets
+# ==============================================================================
+# Ignore raw data directories and heavy CSV/Parquet trials
+data/
 exported_csvs/
+*.b3d
+*.parquet
+*.csv
+
+# Ignore downloaded musculoskeletal meshes ZIP and uncompressed folder
+Geometry.zip
+Geometry/
+
+# ==============================================================================
+# Frontend (TypeScript & Vite)
+# ==============================================================================
+# Dependency directories
+node_modules/
+jspm_packages/
+
+# Production build outputs
+frontend/dist/
+frontend/out/
+
+# Log files
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local environment variables
+frontend/.env
+frontend/.env.local
+frontend/.env.*.local
+
+# TypeScript incremental compilation cache
+*.tsbuildinfo
