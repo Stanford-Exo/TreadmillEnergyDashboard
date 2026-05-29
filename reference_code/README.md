@@ -1,0 +1,1 @@
+This code is not part of the project, this is just a reference for how to use `nimblephysics` to interact with AddBiomechanics data.

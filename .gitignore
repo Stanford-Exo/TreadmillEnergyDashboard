@@ -6,3 +6,4 @@ __pycache__
 *.csv
 Geometry/
 apply_fixes.py
+exported_csvs/
