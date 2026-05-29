@@ -57,6 +57,8 @@ If we have live mocap (from scaled triads with distance signatures to ID them), 
 
 ## Methods to Lower Bound Metabolic Cost (mhich are Real-Time and Interpretable)
 
+There has been one paper that I know of that has done a thorough job of computing mechanical work, and relating that to exoskeleton assistance. "Biomechanical walking mechanisms underlying the metabolic reduction caused by an autonomous exoskeleton" https://link.springer.com/content/pdf/10.1186/s12984-016-0111-3.pdf. That's it, as far as I can find, because it's so labor intensive to do this analysis normally.
+
 We have several options to lower bound metabolic cost.
 
 As a rough unit conversion, we will say that:

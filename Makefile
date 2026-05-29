@@ -43,6 +43,10 @@ validate-strides:
 export:
 	PYTHONPATH=src $(PYTHON) -m addbiomechanics_export.export
 
+# Run the Python REST/Ingestion backend server
+server:
+	PYTHONPATH=src $(PYTHON) src/server/server.py
+
 # Clean up temporary Python caching artifacts
 clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} +
