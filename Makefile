@@ -1,11 +1,19 @@
 # Variables
 PYTHON = python3
 
-.PHONY: test clean
+.PHONY: test clean validate export
 
 # Run all unit tests inside the test directory
 test:
-	PYTHONPATH=. $(PYTHON) -m unittest discover -s test -p "test_*.py"
+	PYTHONPATH=src $(PYTHON) -m unittest discover -s test -p "test_*.py"
+
+# Run the offline Kalman Filter validation evaluation
+validate:
+	PYTHONPATH=src $(PYTHON) -m validation.validate_kf
+
+# Run the AddBiomechanics data exporter
+export:
+	PYTHONPATH=src $(PYTHON) -m addbiomechanics_export.export
 
 # Clean up temporary Python caching artifacts
 clean:

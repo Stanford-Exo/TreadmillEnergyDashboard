@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 import numpy as np
 import nimblephysics as nimble
+from addbiomechanics_export.classification_pass import classification_pass
 
 # Verify dependencies for parquet writing
 try:
@@ -101,6 +102,12 @@ def export_subject_data(file_path: str, geometry_dir: str):
     joint_names = [j.getName() for j in joints]
     contact_bodies = subject.getGroundForceBodies()
 
+    try:
+        subject.loadAllFrames(doNotStandardizeForcePlateData=True)
+    except Exception as e:
+        print(f"Failed to load frames for {file_path}: {e}")
+        return
+    classification_pass(subject)  # Apply classification to populate processingPasses with labels
     raw_header = subject.getHeaderProto()
     raw_trials = list(raw_header.getTrials())
 
@@ -108,8 +115,9 @@ def export_subject_data(file_path: str, geometry_dir: str):
     for trial in range(subject.getNumTrials()):
         # Constraint 1: Keep only trials that are designated as TREADMILL
         trial_type = raw_trials[trial].getBasicTrialType()
-        if trial_type != nimble.biomechanics.BasicTrialType.TREADMILL:
-            print(f"  Skipping Trial {trial}: trial type is {trial_type} (expected TREADMILL)")
+        print(f"  Trial {trial}: type is {trial_type}")
+        if trial_type != nimble.biomechanics.BasicTrialType.TREADMILL and trial_type != nimble.biomechanics.BasicTrialType.STATIC_TRIAL:
+            print(f"  Skipping Trial {trial}: trial type is {trial_type} (expected TREADMILL or STATIC_TRIAL)")
             continue
 
         # Constraint 2: Keep only trials with exactly 4 processing passes
@@ -135,6 +143,7 @@ def export_subject_data(file_path: str, geometry_dir: str):
         if has_missing_grf:
             print(f"  Skipping Trial {trial}: missing GRF elements detected in frame sequence")
             continue
+        print(f"  Trial {trial}: passed all constraints, exporting data...")
 
         trial_name = subject.getTrialName(trial) or f"trial_{trial}"
         print(f"  Processing Trial: {trial_name} ({trial_len} frames)")
@@ -192,11 +201,16 @@ def export_subject_data(file_path: str, geometry_dir: str):
             # Select the last processing pass (index 2)
             smoothed_pass = frame_data.processingPasses[-1]
             skel.setPositions(smoothed_pass.pos)
+            skel.setVelocities(smoothed_pass.vel)
+            skel.setAccelerations(smoothed_pass.acc)
 
             # Retrieve untransformed kinematic metrics
-            com_pos = skel.getCOM()
-            com_vel = skel.getCOMLinearVelocity()
+            # com_pos = skel.getCOM()
+            # com_vel = skel.getCOMLinearVelocity()
             com_acc = skel.getCOMLinearAcceleration()
+
+            com_pos = smoothed_pass.comPos
+            com_vel = smoothed_pass.comVel
 
             forces = smoothed_pass.groundContactForce
             cops = smoothed_pass.groundContactCenterOfPressure
