@@ -281,15 +281,10 @@ def export_subject_data(file_path: str, geometry_dir: str):
             skel.setVelocities(smoothed_pass.vel)
             skel.setAccelerations(smoothed_pass.acc)
 
-            # com_pos = smoothed_pass.comPos
-            # com_vel = smoothed_pass.comVel
             com_pos = skel.getCOM()
             com_vel = skel.getCOMLinearVelocity()
             com_acc = skel.getCOMLinearAcceleration()
 
-            # forces = smoothed_pass.groundContactForce
-            # cops = smoothed_pass.groundContactCenterOfPressure
-            # torques = smoothed_pass.groundContactTorque
             forces = raw_pass.groundContactForce
             cops = raw_pass.groundContactCenterOfPressure
             torques = raw_pass.groundContactTorque
@@ -403,6 +398,13 @@ def export_subject_data(file_path: str, geometry_dir: str):
         df_trq = df_trq.iloc[EDGE_TRIM_FRAMES:-EDGE_TRIM_FRAMES].reset_index(drop=True)
         df_render = df_render.iloc[EDGE_TRIM_FRAMES:-EDGE_TRIM_FRAMES].reset_index(drop=True)
 
+        # 2b. De-bias COM velocity values
+        # Since these are treadmill or static trials, the net average velocity is physically zero.
+        # This removes small numerical drift/offsets from the biomechanics pipeline.
+        for col in ['com_vel_x', 'com_vel_y', 'com_vel_z']:
+            if col in df_com.columns:
+                df_com[col] = df_com[col] - df_com[col].mean()
+
         # 3. Correct time and frame sequences to be perfectly sequential
         dt = segments[0][4]
         for df in [df_com, df_trq, df_render]:
@@ -437,6 +439,9 @@ def main():
             continue
         if 'Carter' in b3d_file:
             print(f"  Skipping {b3d_file}: identified as Carter dataset (no horizontal GRF).")
+            continue
+        if 'vanderZee' in b3d_file:
+            print(f"  Skipping {b3d_file}: identified as VanderZee dataset (strange horizontal GRF bugs).")
             continue
         export_subject_data(b3d_file, GEOMETRY_FOLDER)
 
