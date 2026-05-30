@@ -71,6 +71,10 @@ We know that energy into and out of tendons over the course of a stride must int
 
 We can assume that net negative human work (after subtracting out exo work) at/after heel strike and before dorsiflexion (estimate this as first ~15% of gait cycle) is negative muscle work. Then use the "tendon balance" method to estimate the other necessary muscle work that must be happening to balance the energy flow.
 
+The other way to bound the Achilles energy storage is by measuring the positive power push-off from the trailing leg right before toe-off. The energy stored and returned at nearly perfect efficiency in the Achillese cannot be greater than the total positive energy from toe-off.
+
+Neither of these methods are helpful during running, because there are toe runners who could be loading and discharging the Achilles during the entire stride.
+
 ### Alternative conservative lower bound: immobilize the ankles (wear an ankle boot), and assume no tendon storage
 
 If there is no Achilles tendon storage, because the ankle is experimentally immobilized, then we can assume that all positive and negative net human work (after subtracting out exo work) is coming from muscles, and compute a metabolic lower bound.
