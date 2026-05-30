@@ -44,8 +44,40 @@ def get_array(data, key, is_v73):
         return data[key].flatten()
 
 
+def half_sample_mode(data):
+    """
+    Computes the Half-Sample Mode of a 1D array.
+    Recursively isolates the densest interval containing 50% of the samples
+    until a small subset remains, returning their mean.
+    """
+    if len(data) == 0:
+        return 0.0
+    
+    # Sort data to enable sliding-window range checks
+    pts = np.sort(data)
+    
+    while len(pts) > 3:
+        n = len(pts)
+        half = n // 2
+        # Calculate the span of each window containing 'half' elements
+        ranges = pts[half - 1:] - pts[:-half + 1]
+        min_idx = np.argmin(ranges)
+        # Keep only the elements within the densest interval
+        pts = pts[min_idx : min_idx + half]
+        
+    return float(np.mean(pts))
+
+
+def estimate_channel_bias(data, threshold=40.0):
+    """Filters data below absolute threshold and computes the Half-Sample Mode."""
+    candidates = data[np.abs(data) < threshold]
+    if len(candidates) == 0:
+        return 0.0
+    return half_sample_mode(candidates)
+
+
 def export_trial(file_path, output_dir):
-    """Translates a single Pogensee .mat file to a transformed Parquet file."""
+    """Translates a single Pogensee .mat file to a transformed, zero-corrected Parquet file."""
     print(f"  Processing: {os.path.basename(file_path)}")
     
     try:
@@ -54,21 +86,21 @@ def export_trial(file_path, output_dir):
         print(f"    Skipping {file_path}: Unable to parse mat file structure. {e}")
         return
 
-    # Extract required base variables
+    # Extract raw force, torque, and temporal arrays
     try:
-        LFx = get_array(mat_data, 'LFx', is_v73)
-        LFy = get_array(mat_data, 'LFy', is_v73)
-        LFz = get_array(mat_data, 'LFz', is_v73)
-        LMx = get_array(mat_data, 'LMx', is_v73)
-        LMy = get_array(mat_data, 'LMy', is_v73)
-        LMz = get_array(mat_data, 'LMz', is_v73)
+        LFx = get_array(mat_data, 'LFx', is_v73).copy()
+        LFy = get_array(mat_data, 'LFy', is_v73).copy()
+        LFz = get_array(mat_data, 'LFz', is_v73).copy()
+        LMx = get_array(mat_data, 'LMx', is_v73).copy()
+        LMy = get_array(mat_data, 'LMy', is_v73).copy()
+        LMz = get_array(mat_data, 'LMz', is_v73).copy()
 
-        RFx = get_array(mat_data, 'RFx', is_v73)
-        RFy = get_array(mat_data, 'RFy', is_v73)
-        RFz = get_array(mat_data, 'RFz', is_v73)
-        RMx = get_array(mat_data, 'RMx', is_v73)
-        RMy = get_array(mat_data, 'RMy', is_v73)
-        RMz = get_array(mat_data, 'RMz', is_v73)
+        RFx = get_array(mat_data, 'RFx', is_v73).copy()
+        RFy = get_array(mat_data, 'RFy', is_v73).copy()
+        RFz = get_array(mat_data, 'RFz', is_v73).copy()
+        RMx = get_array(mat_data, 'RMx', is_v73).copy()
+        RMy = get_array(mat_data, 'RMy', is_v73).copy()
+        RMz = get_array(mat_data, 'RMz', is_v73).copy()
 
         time = get_array(mat_data, 'time', is_v73)
     except KeyError as e:
@@ -77,20 +109,66 @@ def export_trial(file_path, output_dir):
             mat_data.close()
         return
 
+    # 1. Estimate biases using the Half-Sample Mode on low-magnitude absolute values (< 40N)
+    bias_LFx = estimate_channel_bias(LFx, threshold=40.0)
+    bias_LFy = estimate_channel_bias(LFy, threshold=40.0)
+    bias_LFz = estimate_channel_bias(LFz, threshold=40.0)
+
+    bias_RFx = estimate_channel_bias(RFx, threshold=40.0)
+    bias_RFy = estimate_channel_bias(RFy, threshold=40.0)
+    bias_RFz = estimate_channel_bias(RFz, threshold=40.0)
+
+    # 2. Subtract the estimated biases
+    LFx_clean = LFx - bias_LFx
+    LFy_clean = LFy - bias_LFy
+    LFz_clean = LFz - bias_LFz
+
+    RFx_clean = RFx - bias_RFx
+    RFy_clean = RFy - bias_RFy
+    RFz_clean = RFz - bias_RFz
+
+    # 3. Post-filter step: Zero out timesteps where 3D force magnitude is under 5N
+    norm_l = np.sqrt(LFx_clean**2 + LFy_clean**2 + LFz_clean**2)
+    norm_r = np.sqrt(RFx_clean**2 + RFy_clean**2 + RFz_clean**2)
+
+    under_threshold_l = norm_l < 5.0
+    under_threshold_r = norm_r < 5.0
+
+    # Clean left foot
+    LFx_clean[under_threshold_l] = 0.0
+    LFy_clean[under_threshold_l] = 0.0
+    LFz_clean[under_threshold_l] = 0.0
+    LMx[under_threshold_l] = 0.0
+    LMy[under_threshold_l] = 0.0
+    LMz[under_threshold_l] = 0.0
+
+    # Clean right foot
+    RFx_clean[under_threshold_r] = 0.0
+    RFy_clean[under_threshold_r] = 0.0
+    RFz_clean[under_threshold_r] = 0.0
+    RMx[under_threshold_r] = 0.0
+    RMy[under_threshold_r] = 0.0
+    RMz[under_threshold_r] = 0.0
+
+    # Print log of estimated offsets to standard output for review
+    print(f"    Calculated Zero-Bias Offsets (HSM):")
+    print(f"      Left Plate  -> Fx: {bias_LFx:+.3f} N, Fy: {bias_LFy:+.3f} N, Fz: {bias_LFz:+.3f} N")
+    print(f"      Right Plate -> Fx: {bias_RFx:+.3f} N, Fy: {bias_RFy:+.3f} N, Fz: {bias_RFz:+.3f} N")
+
     # 15mm sensor depth offset in meters (vertical dimension)
     z0 = -0.015
 
-    # Compute Local Center of Pressures (CoPs) with high-frequency division guards
+    # Compute Local Center of Pressures (CoPs) with division guards
     with np.errstate(divide='ignore', invalid='ignore'):
-        cop_l_x_local = np.where(np.abs(LFz) > 10.0, (-LMy + z0 * LFx) / LFz, 0.0)
-        cop_l_y_local = np.where(np.abs(LFz) > 10.0, (LMx + z0 * LFy) / LFz, 0.0)
+        cop_l_x_local = np.where(np.abs(LFz_clean) > 0.0, (-LMy + z0 * LFx_clean) / LFz_clean, 0.0)
+        cop_l_y_local = np.where(np.abs(LFz_clean) > 0.0, (LMx + z0 * LFy_clean) / LFz_clean, 0.0)
 
-        cop_r_x_local = np.where(np.abs(RFz) > 10.0, (-RMy + z0 * RFx) / RFz, 0.0)
-        cop_r_y_local = np.where(np.abs(RFz) > 10.0, (RMx + z0 * RFy) / RFz, 0.0)
+        cop_r_x_local = np.where(np.abs(RFz_clean) > 0.0, (-RMy + z0 * RFx_clean) / RFz_clean, 0.0)
+        cop_r_y_local = np.where(np.abs(RFz_clean) > 0.0, (RMx + z0 * RFy_clean) / RFz_clean, 0.0)
 
     # Compute Local Free Torque about vertical axis at CoP: Tz = Mz - (x * Fy - y * Fx)
-    torque_l_z_local = LMz - (cop_l_x_local * LFy - cop_l_y_local * LFx)
-    torque_r_z_local = RMz - (cop_r_x_local * RFy - cop_r_y_local * RFx)
+    torque_l_z_local = LMz - (cop_l_x_local * LFy_clean - cop_l_y_local * LFx_clean)
+    torque_r_z_local = RMz - (cop_r_x_local * RFy_clean - cop_r_y_local * RFx_clean)
 
     # Populate primary output mapping
     df = pd.DataFrame()
@@ -98,9 +176,9 @@ def export_trial(file_path, output_dir):
     df["time"] = time
 
     # Map Left Foot GRF and CoP to global (Y-up, right-handed system)
-    df["calcn_l_force_x"] = -LFy
-    df["calcn_l_force_y"] = LFz
-    df["calcn_l_force_z"] = LFx
+    df["calcn_l_force_x"] = -LFy_clean
+    df["calcn_l_force_y"] = LFz_clean
+    df["calcn_l_force_z"] = LFx_clean
 
     df["calcn_l_cop_x"] = cop_l_y_local
     df["calcn_l_cop_y"] = 0.0
@@ -111,9 +189,9 @@ def export_trial(file_path, output_dir):
     df["calcn_l_torque_z"] = 0.0
 
     # Map Right Foot GRF and CoP to global
-    df["calcn_r_force_x"] = -RFy
-    df["calcn_r_force_y"] = RFz
-    df["calcn_r_force_z"] = RFx
+    df["calcn_r_force_x"] = -RFy_clean
+    df["calcn_r_force_y"] = RFz_clean
+    df["calcn_r_force_z"] = RFx_clean
 
     df["calcn_r_cop_x"] = cop_r_y_local
     df["calcn_r_cop_y"] = 0.0
