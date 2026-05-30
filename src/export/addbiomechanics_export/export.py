@@ -5,7 +5,7 @@ import itertools
 from pathlib import Path
 import numpy as np
 import nimblephysics as nimble
-from addbiomechanics_export.classification_pass import classification_pass
+from src.export.addbiomechanics_export.classification_pass import classification_pass
 
 # Verify dependencies for parquet writing
 try:

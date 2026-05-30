@@ -1,3 +1,5 @@
+# File: src/validation/validate_strides.py
+
 import os
 import sys
 import glob
@@ -150,10 +152,8 @@ def main():
             plt.grid(True, linestyle=":", alpha=0.6)
             plt.legend()
             
-            plot_path = os.path.join(OUT_ANALYSIS_DIR, filename.replace(".parquet", "_power_profile.png"))
-            plt.savefig(plot_path, dpi=150)
-            plt.close()
-            print(f"    Saved stride-average plot -> {plot_path}")
+            print(f"    Displaying stride-average plot for {filename}...")
+            plt.show()
 
     # Export compiled dataset summaries
     if overall_dataset_metrics:

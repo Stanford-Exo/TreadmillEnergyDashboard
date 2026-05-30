@@ -98,9 +98,9 @@ def export_trial(file_path, output_dir):
     df["time"] = time
 
     # Map Left Foot GRF and CoP to global (Y-up, right-handed system)
-    df["calcn_l_force_x"] = LFy
-    df["calcn_l_force_y"] = -LFz
-    df["calcn_l_force_z"] = -LFx
+    df["calcn_l_force_x"] = -LFy
+    df["calcn_l_force_y"] = LFz
+    df["calcn_l_force_z"] = LFx
 
     df["calcn_l_cop_x"] = cop_l_y_local
     df["calcn_l_cop_y"] = 0.0
@@ -111,9 +111,9 @@ def export_trial(file_path, output_dir):
     df["calcn_l_torque_z"] = 0.0
 
     # Map Right Foot GRF and CoP to global
-    df["calcn_r_force_x"] = RFy
-    df["calcn_r_force_y"] = -RFz
-    df["calcn_r_force_z"] = -RFx
+    df["calcn_r_force_x"] = -RFy
+    df["calcn_r_force_y"] = RFz
+    df["calcn_r_force_z"] = RFx
 
     df["calcn_r_cop_x"] = cop_r_y_local
     df["calcn_r_cop_y"] = 0.0

@@ -1,7 +1,7 @@
 # Variables
 PYTHON = python3
 
-.PHONY: test clean validate validate-strides export
+.PHONY: test clean validate validate-strides export analyze-poggensee
 
 # GNU Make pattern to capture trailing targets and translate them into flags.
 # This allows running: make validate plot
@@ -46,6 +46,10 @@ export:
 # Run the Katie Poggensee Exoskeleton data exporter
 export-poggensee:
 	PYTHONPATH=src $(PYTHON) -m export.poggensee_export.export_poggensee
+
+# Run the Katie Poggensee stride power analyzer
+analyze-poggensee:
+	PYTHONPATH=src $(PYTHON) -m analysis.analyze_poggensee
 
 # Run the Python REST/Ingestion backend server
 server:
