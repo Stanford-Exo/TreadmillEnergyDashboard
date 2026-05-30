@@ -43,9 +43,9 @@ validate-strides:
 export:
 	PYTHONPATH=src $(PYTHON) -m export.addbiomechanics_export.export
 
-# Run the Pogensee / Katie Exoskeleton data exporter
-export-pogensee:
-	PYTHONPATH=src $(PYTHON) -m export.pogensee_export.export_pogensee
+# Run the Katie Poggensee Exoskeleton data exporter
+export-poggensee:
+	PYTHONPATH=src $(PYTHON) -m export.poggensee_export.export_poggensee
 
 # Run the Python REST/Ingestion backend server
 server:
