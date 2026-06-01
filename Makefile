@@ -47,8 +47,11 @@ export:
 export-poggensee:
 	PYTHONPATH=src $(PYTHON) -m export.poggensee_export.export_poggensee
 
-export-metabolics:
-	PYTHONPATH=src $(PYTHON) -m analysis.build_metabolics_csv
+precompute-poggensee:
+	PYTHONPATH=src $(PYTHON) -m analysis.precompute_poggensee
+
+animate-poggensee:
+	PYTHONPATH=src $(PYTHON) -m analysis.animate_adaptation
 
 correlate-metabolics:
 	PYTHONPATH=src $(PYTHON) -m analysis.correlate_metabolics
