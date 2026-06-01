@@ -51,7 +51,7 @@ precompute-poggensee:
 	PYTHONPATH=src $(PYTHON) -m analysis.precompute_poggensee
 
 animate-poggensee:
-	PYTHONPATH=src $(PYTHON) -m analysis.animate_adaptation
+	PYTHONPATH=src $(PYTHON) -m analysis.animate_adaptation --save
 
 correlate-metabolics:
 	PYTHONPATH=src $(PYTHON) -m analysis.correlate_metabolics
