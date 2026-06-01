@@ -431,7 +431,7 @@ def main():
         active_fy = f_total_y[f_total_y > 50.0]
         calc_mass = np.mean(active_fy) / 9.81 if len(active_fy) > 0 else 70.0
 
-        analyzer = EnergyAnalyzer(initial_mass=calc_mass, foot_roll_length=0.254)
+        analyzer = EnergyAnalyzer(initial_mass=calc_mass, foot_roll_length=0.254, override_belt_speed=1.25)
 
         for i in range(min(len(df), 150000)):
             if i % 25000 == 0:

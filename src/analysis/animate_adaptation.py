@@ -67,7 +67,7 @@ def format_time(seconds):
 def main():
     parser = argparse.ArgumentParser(description="Animate adaptation changes over time from precomputed gait cycles.")
     parser.add_argument("--file", type=str, default=DEFAULT_PARQUET_PATH, help="Path to the precomputed parquet database.")
-    parser.add_argument("--trial", type=str, default="Static_Training_1_Adaptation_adaptation_Day3_ADAPT1", 
+    parser.add_argument("--trial", type=str, default="Static_Training_1_Validation_Day1_ZT1", 
                         help="Exact trial name to filter.")
     parser.add_argument("--save", action="store_true", help="Save the output as a GIF instead of showing it interactively.")
     args = parser.parse_args()
@@ -320,7 +320,7 @@ def main():
         ax.legend(handles[::-1], labels[::-1], frameon=False, loc="upper left", fontsize=9, labelcolor=NOTION_TEXT, ncol=2)
 
         # Big Chronological Indicator in Top Title
-        fig.suptitle(f"Chronological Gait Adaptation: Day 3", fontsize=15, fontweight='bold', color=NOTION_TEXT, y=0.96)
+        fig.suptitle(f"Chronological Gait Adaptation: Day 5", fontsize=15, fontweight='bold', color=NOTION_TEXT, y=0.96)
 
     # 5. Build and Save/Show Animation
     # Set interval to 2000ms (2 seconds per 5-minute chunk) to allow observation of shifts

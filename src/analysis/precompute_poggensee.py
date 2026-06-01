@@ -232,7 +232,7 @@ def process_trial(df, left_body, right_body, trial_name, burn_in_s, window_s, mi
     active_fy = f_total_y[f_total_y > 50.0]
     calc_mass = np.mean(active_fy) / 9.81 if len(active_fy) > 0 else 70.0
 
-    analyzer = EnergyAnalyzer(initial_mass=calc_mass, foot_roll_length=0.254)
+    analyzer = EnergyAnalyzer(initial_mass=calc_mass, foot_roll_length=0.254, override_belt_speed=1.25)
     
     left_forces = df[[f"{left_body}_force_x", f"{left_body}_force_y", f"{left_body}_force_z"]].values
     right_forces = df[[f"{right_body}_force_x", f"{right_body}_force_y", f"{right_body}_force_z"]].values

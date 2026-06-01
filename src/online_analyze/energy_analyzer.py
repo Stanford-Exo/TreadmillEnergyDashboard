@@ -8,9 +8,9 @@ class EnergyAnalyzer:
     Computes real-time overground powers and symmetrically aggregates 
     energetics across full stride cycles for both legs.
     """
-    def __init__(self, initial_mass=70.0, contact_threshold=30.0, foot_roll_length=0.254, num_gait_points=100):
+    def __init__(self, initial_mass=70.0, contact_threshold=30.0, foot_roll_length=0.254, num_gait_points=100, override_belt_speed=None):
         self.kf = ComKalmanFilter(initial_mass=initial_mass)
-        self.stride_analyzer = StrideAnalyzer(contact_threshold=contact_threshold, foot_roll_length=foot_roll_length)
+        self.stride_analyzer = StrideAnalyzer(contact_threshold=contact_threshold, foot_roll_length=foot_roll_length, override_belt_speed=override_belt_speed)
         self.num_gait_points = num_gait_points
         
         self.active_strides = {'left': None, 'right': None}

@@ -6,9 +6,10 @@ class StrideAnalyzer:
     Analyzes bilateral force and center of pressure (CoP) data streams to segment
     gait cycles, estimate belt speed, and compute spatial/temporal parameters.
     """
-    def __init__(self, contact_threshold=30.0, foot_roll_length=0.254):
+    def __init__(self, contact_threshold=30.0, foot_roll_length=0.254, override_belt_speed=None):
         self.contact_threshold = contact_threshold
         self.foot_roll_length = foot_roll_length  # Default 10 inches
+        self.override_belt_speed = override_belt_speed
         
         self.contact_states = {'left': None, 'right': None}
         self.heel_strike_times = {'left': [], 'right': []}
@@ -24,8 +25,8 @@ class StrideAnalyzer:
         self.last_strike_cop = None
         
         self.belt_speeds = []
-        self.current_belt_speed = 1.25  
-        self.belt_velocity = np.array([-1.25, 0.0, 0.0]) # 3D vector for frame translation
+        self.current_belt_speed = override_belt_speed if override_belt_speed is not None else 1.25  
+        self.belt_velocity = np.array([-self.current_belt_speed, 0.0, 0.0]) # 3D vector for frame translation
         
         self.metrics = {
             'stride_duration': [], 'stride_frequency': [], 'stance_duration': [],
@@ -90,7 +91,10 @@ class StrideAnalyzer:
                         if 0.15 < v_belt_inst < 4.0:
                             self.belt_speeds.append((time, v_belt_inst))
                             recent = [s[1] for s in self.belt_speeds[-10:]]
-                            self.current_belt_speed = float(np.mean(recent))
+                            if self.override_belt_speed is not None:
+                                self.current_belt_speed = self.override_belt_speed
+                            else:
+                                self.current_belt_speed = float(np.mean(recent))
                             # Update 3D vector for downstream power tracking
                             self.belt_velocity = np.array([-d_walk * self.current_belt_speed, 0.0, 0.0])
 
