@@ -47,6 +47,9 @@ export:
 export-poggensee:
 	PYTHONPATH=src $(PYTHON) -m export.poggensee_export.export_poggensee
 
+export-metabolics:
+	PYTHONPATH=src $(PYTHON) -m analysis.build_metabolics_csv
+
 # Run the Katie Poggensee stride power analyzer
 analyze-poggensee:
 	PYTHONPATH=src $(PYTHON) -m analysis.analyze_poggensee
