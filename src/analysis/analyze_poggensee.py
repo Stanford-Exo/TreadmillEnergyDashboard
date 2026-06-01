@@ -30,12 +30,12 @@ NOTION_BG = "#FFFFFF"
 NOTION_TEXT = "#37352F"
 NOTION_SUBTEXT = "#787774"
 
-# Pastel Solid Colors (Reference Leg)
+# Pastel Solid Colors (Stance Leg)
 NOTION_REF_EXO = "#D3E5EF"      
 NOTION_REF_ACH = "#EBE0C5"  # Lighter, elastic golden-beige
 NOTION_REF_MUS = "#D4B89F"  # Deeper, active reddish-brown
 
-# Lighter hatched faces with slightly darker edges (Contralateral Leg)
+# Lighter hatched faces with slightly darker edges (Swing Leg)
 NOTION_CON_EXO_FACE = "#F2F6F9"
 NOTION_CON_EXO_EDGE = "#8EB0C6"
 NOTION_CON_ACH_FACE = "#FDFBEF"
@@ -125,10 +125,10 @@ def get_rotated_foot_marker(angle_deg):
     return Path(np.dot(verts, R.T), [Path.MOVETO] + [Path.LINETO]*7 + [Path.CLOSEPOLY])
 
 
-def plot_tufte_symmetric_stride(filename, aggs, mean_stride_dur, mean_duty_factor, net_bio_watts=None, standing_baseline=70.0):
+def plot_tufte_symmetric_stride(filename, aggs, mean_stride_dur, mean_duty_factor, net_bio_watts=None, standing_baseline=70.0, use_achilles=False):
     """
     Plots the Symmetrically Aggregated Full Stride energetics.
-    Stacks Reference Leg (Solid) and Contralateral Leg (Striped).
+    Stacks Stance Leg (Solid) and Swing Leg (Striped).
     """
     dt = mean_stride_dur / 100.0  
     stride_pct = np.linspace(0, 100, 100)
@@ -137,13 +137,21 @@ def plot_tufte_symmetric_stride(filename, aggs, mean_stride_dur, mean_duty_facto
     ref_exo = np.array(aggs['ref_exo_mean'])
     ref_hum = np.array(aggs['ref_hum_mean'])
     ref_sys = np.array(aggs['ref_sys_mean'])
-    ref_mus, ref_ach = extract_biological_components(ref_hum, dt)
     
     # --- Contralateral Leg Averages ---
     con_exo = np.array(aggs['contra_exo_mean'])
     con_hum = np.array(aggs['contra_hum_mean'])
     con_sys = np.array(aggs['contra_sys_mean'])
-    con_mus, con_ach = extract_biological_components(con_hum, dt)
+    
+    # --- Execute Biological Split conditional on user arguments ---
+    if use_achilles:
+        ref_mus, ref_ach = extract_biological_components(ref_hum, dt)
+        con_mus, con_ach = extract_biological_components(con_hum, dt)
+    else:
+        ref_mus = ref_hum
+        ref_ach = np.zeros_like(ref_hum)
+        con_mus = con_hum
+        con_ach = np.zeros_like(con_hum)
 
     # --- Compute Mechanical Metabolic Estimates ---
     j_pos_ref = np.trapz(np.maximum(ref_mus, 0), dx=dt)
@@ -160,7 +168,10 @@ def plot_tufte_symmetric_stride(filename, aggs, mean_stride_dur, mean_duty_facto
     raw_ref_ach = []
     raw_ref_mus = []
     for rh in aggs['raw']['ref_hum']:
-        rm, ra = extract_biological_components(np.array(rh), dt)
+        if use_achilles:
+            rm, ra = extract_biological_components(np.array(rh), dt)
+        else:
+            rm, ra = np.array(rh), np.zeros_like(rh)
         raw_ref_mus.append(rm)
         raw_ref_ach.append(ra)
         
@@ -168,20 +179,19 @@ def plot_tufte_symmetric_stride(filename, aggs, mean_stride_dur, mean_duty_facto
     raw_con_ach = []
     raw_con_mus = []
     for ch in aggs['raw']['contra_hum']:
-        cm, ca = extract_biological_components(np.array(ch), dt)
+        if use_achilles:
+            cm, ca = extract_biological_components(np.array(ch), dt)
+        else:
+            cm, ca = np.array(ch), np.zeros_like(ch)
         raw_con_mus.append(cm)
         raw_con_ach.append(ca)
-
-    # Total System (Net)
-    tot_sys = ref_sys + con_sys
 
     fig, ax = plt.subplots(figsize=(12, 7), facecolor=NOTION_BG)
     ax.set_facecolor(NOTION_BG)
     
     fig.text(0.04, 0.93, f"Bilateral System Energetics: {filename}", fontsize=16, fontweight='bold', color=NOTION_TEXT)
-    fig.text(0.04, 0.88, "Full Stride Cycle: Reference Leg (Solid) & Contralateral Leg (Striped) in Stationary Frame", fontsize=12, color=NOTION_SUBTEXT)
+    fig.text(0.04, 0.88, "Full Stride Cycle: Stance Leg (Solid) & Swing Leg (Striped) in Stationary Frame", fontsize=12, color=NOTION_SUBTEXT)
     
-    # Margins expanded slightly to fit new Contra labels cleanly
     plt.subplots_adjust(top=0.77, bottom=0.20)
 
     for spine in ['top', 'right', 'bottom', 'left']:
@@ -211,9 +221,8 @@ def plot_tufte_symmetric_stride(filename, aggs, mean_stride_dur, mean_duty_facto
     neg_con_ach = neg_con_exo + np.minimum(con_ach, 0)
     neg_con_mus = neg_con_ach + np.minimum(con_mus, 0)
 
-    # Calculate padding bounds to keep data below the legend and limit vertical lines
-    max_power = max(np.max(pos_ref_mus), np.max(pos_con_mus), np.max(tot_sys))
-    min_power = min(np.min(neg_ref_mus), np.min(neg_con_mus), np.min(tot_sys))
+    max_power = max(np.max(pos_ref_mus), np.max(pos_con_mus))
+    min_power = min(np.min(neg_ref_mus), np.min(neg_con_mus))
     
     y_upper = max_power * 1.45  # 45% headroom specifically for the legend
     y_lower = min_power * 1.15  # 15% footroom below the deepest negative power
@@ -221,29 +230,30 @@ def plot_tufte_symmetric_stride(filename, aggs, mean_stride_dur, mean_duty_facto
     ax.set_ylim(y_lower, y_upper)
 
     # --- 2. Fill Polygons ---
-    # Reference Fills
-    ax.fill_between(stride_pct, z, pos_ref_exo, color=NOTION_REF_EXO, alpha=0.95, linewidth=0, label="Ref Leg Exo")
-    ax.fill_between(stride_pct, pos_ref_exo, pos_ref_ach, color=NOTION_REF_ACH, alpha=0.95, linewidth=0, label="Ref Leg Likely Achilles")
-    ax.fill_between(stride_pct, pos_ref_ach, pos_ref_mus, color=NOTION_REF_MUS, alpha=0.95, linewidth=0, label="Ref Leg Muscle")
+    # Reference (Stance Leg) Fills
+    ax.fill_between(stride_pct, z, pos_ref_exo, color=NOTION_REF_EXO, alpha=0.95, linewidth=0, label="Stance Leg Exo")
+    if use_achilles:
+        ax.fill_between(stride_pct, pos_ref_exo, pos_ref_ach, color=NOTION_REF_ACH, alpha=0.95, linewidth=0, label="Stance Leg Achilles")
+    ax.fill_between(stride_pct, pos_ref_ach, pos_ref_mus, color=NOTION_REF_MUS, alpha=0.95, linewidth=0, label="Stance Leg Muscle" if use_achilles else "Stance Leg Human")
 
-    # Contralateral Fills
-    ax.fill_between(stride_pct, pos_ref_mus, pos_con_exo, facecolor=NOTION_CON_EXO_FACE, edgecolor=NOTION_CON_EXO_EDGE, hatch='////', linewidth=0.5, label="Contra Leg Exo")
-    ax.fill_between(stride_pct, pos_con_exo, pos_con_ach, facecolor=NOTION_CON_ACH_FACE, edgecolor=NOTION_CON_ACH_EDGE, hatch='////', linewidth=0.5, label="Contra Leg Likely Achilles")
-    ax.fill_between(stride_pct, pos_con_ach, pos_con_mus, facecolor=NOTION_CON_MUS_FACE, edgecolor=NOTION_CON_MUS_EDGE, hatch='////', linewidth=0.5, label="Contra Leg Muscle")
+    # Contralateral (Swing Leg) Fills
+    ax.fill_between(stride_pct, pos_ref_mus, pos_con_exo, facecolor=NOTION_CON_EXO_FACE, edgecolor=NOTION_CON_EXO_EDGE, hatch='////', linewidth=0.5, label="Swing Leg Exo")
+    if use_achilles:
+        ax.fill_between(stride_pct, pos_con_exo, pos_con_ach, facecolor=NOTION_CON_ACH_FACE, edgecolor=NOTION_CON_ACH_EDGE, hatch='////', linewidth=0.5, label="Swing Leg Achilles")
+    ax.fill_between(stride_pct, pos_con_ach, pos_con_mus, facecolor=NOTION_CON_MUS_FACE, edgecolor=NOTION_CON_MUS_EDGE, hatch='////', linewidth=0.5, label="Swing Leg Muscle" if use_achilles else "Swing Leg Human")
 
     # Negative Fills
     ax.fill_between(stride_pct, z, neg_ref_exo, color=NOTION_REF_EXO, alpha=0.95, linewidth=0)
-    ax.fill_between(stride_pct, neg_ref_exo, neg_ref_ach, color=NOTION_REF_ACH, alpha=0.95, linewidth=0)
+    if use_achilles:
+        ax.fill_between(stride_pct, neg_ref_exo, neg_ref_ach, color=NOTION_REF_ACH, alpha=0.95, linewidth=0)
     ax.fill_between(stride_pct, neg_ref_ach, neg_ref_mus, color=NOTION_REF_MUS, alpha=0.95, linewidth=0)
 
     ax.fill_between(stride_pct, neg_ref_mus, neg_con_exo, facecolor=NOTION_CON_EXO_FACE, edgecolor=NOTION_CON_EXO_EDGE, hatch='////', linewidth=0.5)
-    ax.fill_between(stride_pct, neg_con_exo, neg_con_ach, facecolor=NOTION_CON_ACH_FACE, edgecolor=NOTION_CON_ACH_EDGE, hatch='////', linewidth=0.5)
+    if use_achilles:
+        ax.fill_between(stride_pct, neg_con_exo, neg_con_ach, facecolor=NOTION_CON_ACH_FACE, edgecolor=NOTION_CON_ACH_EDGE, hatch='////', linewidth=0.5)
     ax.fill_between(stride_pct, neg_con_ach, neg_con_mus, facecolor=NOTION_CON_MUS_FACE, edgecolor=NOTION_CON_MUS_EDGE, hatch='////', linewidth=0.5)
 
-    # --- 3. Net System Power Line ---
-    ax.plot(stride_pct, tot_sys, color="#111827", linestyle=":", linewidth=2.5, label="Net System Power", zorder=10)
-
-    # --- 4. Draw Centered Text Labels ---
+    # --- 3. Draw Centered Text Labels ---
     stroke = [pe.withStroke(linewidth=3, foreground=NOTION_BG, alpha=0.8)]
     
     def label_blocks(sys_curve, exo_curve, ach_curve, mus_curve, 
@@ -280,8 +290,10 @@ def plot_tufte_symmetric_stride(filename, aggs, mean_stride_dur, mean_duty_facto
                 
             if abs(m_exo_j) >= 0.5 and abs(p_e) >= 4.0:
                 ax.text(cx, y_exo, f"{m_exo_j:+.1f} J\n±{s_exo_j:.1f} J", color=t_color_exo, fontsize=9, fontweight='bold', ha='center', va='center', path_effects=stroke, zorder=15)
-            if abs(m_ach_j) >= 0.5 and abs(p_a) >= 4.0:
+            
+            if use_achilles and abs(m_ach_j) >= 0.5 and abs(p_a) >= 4.0:
                 ax.text(cx, y_ach, f"{m_ach_j:+.1f} J\n±{s_ach_j:.1f} J", color=t_color_ach, fontsize=9, fontweight='bold', ha='center', va='center', path_effects=stroke, zorder=15)
+            
             if abs(m_mus_j) >= 0.5 and abs(p_m) >= 4.0:
                 ax.text(cx, y_mus, f"{m_mus_j:+.1f} J\n±{s_mus_j:.1f} J", color=t_color_mus, fontsize=9, fontweight='bold', ha='center', va='center', path_effects=stroke, zorder=15)
 
@@ -297,7 +309,7 @@ def plot_tufte_symmetric_stride(filename, aggs, mean_stride_dur, mean_duty_facto
                  neg_exo_base=neg_ref_mus, neg_ach_base=neg_con_exo, neg_mus_base=neg_con_ach, 
                  t_color_exo=TEXT_COLOR_EXO, t_color_ach=TEXT_COLOR_ACH, t_color_mus=TEXT_COLOR_MUS)
 
-    # --- 5. Custom X-Axis formatting (Ticks and Foot Icons) ---
+    # --- 4. Custom X-Axis formatting (Ticks and Foot Icons) ---
     ax.set_xlim(0, 100) 
     
     duty_pct = mean_duty_factor * 100
@@ -307,7 +319,6 @@ def plot_tufte_symmetric_stride(filename, aggs, mean_stride_dur, mean_duty_facto
     ax.set_xticks([0, contra_to, contra_hs, duty_pct, 100])
     ax.set_xticklabels([]) 
     
-    # Tick lines dropping down capped 10% above the peak to avoid legend overlap
     line_top = max_power * 1.10
     
     ax.vlines([0, duty_pct, 100], ymin=y_lower, ymax=line_top, colors='black', linewidths=1.5, linestyles='-', zorder=5)
@@ -317,25 +328,25 @@ def plot_tufte_symmetric_stride(filename, aggs, mean_stride_dur, mean_duty_facto
     icon_y_pos = -0.12
     text_y_pos = -0.22
     
-    # 1. Reference Heel-Strike (0%)
+    # 1. Stance Leg Heel-Strike (0%)
     ax.scatter(0, icon_y_pos, s=700, marker=get_rotated_foot_marker(-25), facecolors=NOTION_TEXT, edgecolors='none', transform=ax.get_xaxis_transform(), clip_on=False)
-    ax.text(0, text_y_pos, "Heel-Strike", transform=ax.get_xaxis_transform(), ha='center', va='top', color=NOTION_TEXT, fontsize=11, fontweight='500')
+    ax.text(0, text_y_pos, "Stance Leg\nHeel-Strike", transform=ax.get_xaxis_transform(), ha='center', va='top', color=NOTION_TEXT, fontsize=11, fontweight='500')
     
-    # 2. Contralateral Toe-Off (~10-15%)
+    # 2. Swing Leg Toe-Off (~10-15%)
     ax.scatter(contra_to, icon_y_pos, s=700, marker=get_rotated_foot_marker(30), facecolors='none', edgecolors=NOTION_SUBTEXT, linestyles='--', linewidths=1.5, transform=ax.get_xaxis_transform(), clip_on=False)
-    ax.text(contra_to, text_y_pos, "Contra\nToe-Off", transform=ax.get_xaxis_transform(), ha='center', va='top', color=NOTION_SUBTEXT, fontsize=10, fontweight='500')
+    ax.text(contra_to, text_y_pos, "Swing Leg\nToe-Off", transform=ax.get_xaxis_transform(), ha='center', va='top', color=NOTION_SUBTEXT, fontsize=10, fontweight='500')
     
-    # 3. Contralateral Heel-Strike (50%)
+    # 3. Swing Leg Heel-Strike (50%)
     ax.scatter(contra_hs, icon_y_pos, s=700, marker=get_rotated_foot_marker(-25), facecolors='none', edgecolors=NOTION_SUBTEXT, linestyles='--', linewidths=1.5, transform=ax.get_xaxis_transform(), clip_on=False)
-    ax.text(contra_hs, text_y_pos, "Contra\nHeel-Strike", transform=ax.get_xaxis_transform(), ha='center', va='top', color=NOTION_SUBTEXT, fontsize=10, fontweight='500')
+    ax.text(contra_hs, text_y_pos, "Swing Leg\nHeel-Strike", transform=ax.get_xaxis_transform(), ha='center', va='top', color=NOTION_SUBTEXT, fontsize=10, fontweight='500')
 
-    # 4. Reference Toe-Off (duty_pct)
+    # 4. Stance Leg Toe-Off (duty_pct)
     ax.scatter(duty_pct, icon_y_pos, s=700, marker=get_rotated_foot_marker(30), facecolors=NOTION_TEXT, edgecolors='none', transform=ax.get_xaxis_transform(), clip_on=False)
-    ax.text(duty_pct, text_y_pos, "Toe-Off", transform=ax.get_xaxis_transform(), ha='center', va='top', color=NOTION_TEXT, fontsize=11, fontweight='500')
+    ax.text(duty_pct, text_y_pos, "Stance Leg\nToe-Off", transform=ax.get_xaxis_transform(), ha='center', va='top', color=NOTION_TEXT, fontsize=11, fontweight='500')
 
-    # 5. Reference Heel-Strike (100%)
+    # 5. Stance Leg Heel-Strike (100%)
     ax.scatter(100, icon_y_pos, s=700, marker=get_rotated_foot_marker(-25), facecolors=NOTION_TEXT, edgecolors='none', transform=ax.get_xaxis_transform(), clip_on=False)
-    ax.text(100, text_y_pos, "Heel-Strike", transform=ax.get_xaxis_transform(), ha='center', va='top', color=NOTION_TEXT, fontsize=11, fontweight='500')
+    ax.text(100, text_y_pos, "Stance Leg\nHeel-Strike", transform=ax.get_xaxis_transform(), ha='center', va='top', color=NOTION_TEXT, fontsize=11, fontweight='500')
 
     # X-Axis Title
     ax.text(0.5, -0.38, "Full Stride Cycle (%)", transform=ax.transAxes, ha='center', va='top', color=NOTION_SUBTEXT, fontsize=11, fontweight='bold')
@@ -353,13 +364,16 @@ def plot_tufte_symmetric_stride(filename, aggs, mean_stride_dur, mean_duty_facto
     ax.legend(unique_handles[::-1], unique_labels[::-1], frameon=False, loc="upper left", 
               fontsize=10, labelcolor=NOTION_TEXT, bbox_to_anchor=(0, 1.08), ncol=3)
 
-    # --- 6. Plot Floating Metabolic Cost Estimates Box ---
+    # --- 5. Plot Floating Metabolic Cost Estimates Box ---
     bio_text = f"{net_bio_watts:.1f} W (Ref {standing_baseline:.1f} W)" if net_bio_watts is not None else "N/A"
+    cost_label = "Est. Muscle Cost (Achilles Extracted)" if use_achilles else "Est. Muscle Cost (No Achilles Model)"
+    
     summary_str = (
         f"Metabolic Cost Estimates\n"
-        f"Mechanical Muscle Cost:  {est_metabolic_watts:.1f} W\n"
+        f"{cost_label}:  {est_metabolic_watts:.1f} W\n"
         f"Respirometry Mask (Net):  {bio_text}"
     )
+    
     ax.text(0.98, 0.95, summary_str, transform=ax.transAxes,
             fontsize=10, va='top', ha='right', color=NOTION_TEXT,
             bbox=dict(boxstyle='round,pad=0.5', facecolor=NOTION_BG, edgecolor='#EDEDED', alpha=0.9))
@@ -370,6 +384,7 @@ def plot_tufte_symmetric_stride(filename, aggs, mean_stride_dur, mean_duty_facto
 def main():
     parser = argparse.ArgumentParser(description="Analyze Poggensee exoskeleton trial datasets.")
     parser.add_argument("--dir", type=str, default=POGGENSEE_DIR)
+    parser.add_argument("--achilles", action="store_true", help="Extract and separate Achilles elastic energy from general human power")
     args = parser.parse_args()
 
     if plt is None:
@@ -388,10 +403,8 @@ def main():
         left_body = next((cb for cb in contact_bodies if cb.endswith("_l") or "left" in cb.lower()), contact_bodies[0])
         right_body = next((cb for cb in contact_bodies if cb.endswith("_r") or "right" in cb.lower()), contact_bodies[1])
 
-        # Extract standing baseline dynamically if provided by exporter, else fallback to 70W
         standing_baseline = df["qs_baseline_w"].iloc[0] if "qs_baseline_w" in df.columns else 70.0
 
-        # Safely extract respirometry data and compute Biological Power (Weir equation)
         vo2_col = next((c for c in df.columns if c.lower() == 'vo2'), None)
         vco2_col = next((c for c in df.columns if c.lower() == 'vco2'), None)
         
@@ -401,8 +414,6 @@ def main():
             vco2_mean = df[vco2_col].replace(0, np.nan).dropna().mean() if vco2_col else 0.85 * vo2_mean
             
             if not np.isnan(vo2_mean) and vo2_mean > 0:
-                # Weir Equation: cal/min = 3.941 * VO2(mL/min) + 1.106 * VCO2(mL/min)
-                # Convert to Watts: 1 cal = 4.184 J, 1 min = 60s
                 cal_per_min = 3.941 * vo2_mean + 1.106 * vco2_mean
                 bio_watts = cal_per_min * 4.184 / 60.0
                 net_bio_watts = bio_watts - standing_baseline
@@ -455,7 +466,7 @@ def main():
         if len(analyzer.stride_profiles['ref_sys']) > 0:
             aggs = analyzer.get_stride_aggregates()
             aggs['raw'] = analyzer.stride_profiles 
-            plot_tufte_symmetric_stride(filename, aggs, mean_stride_dur, mean_duty_factor, net_bio_watts, standing_baseline)
+            plot_tufte_symmetric_stride(filename, aggs, mean_stride_dur, mean_duty_factor, net_bio_watts, standing_baseline, use_achilles=args.achilles)
 
 if __name__ == "__main__":
     main()
