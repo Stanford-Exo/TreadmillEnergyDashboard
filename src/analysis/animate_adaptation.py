@@ -67,7 +67,7 @@ def format_time(seconds):
 def main():
     parser = argparse.ArgumentParser(description="Animate adaptation changes over time from precomputed gait cycles.")
     parser.add_argument("--file", type=str, default=DEFAULT_PARQUET_PATH, help="Path to the precomputed parquet database.")
-    parser.add_argument("--trial", type=str, default="Static_Training_1_Validation_Day1_ZT1", 
+    parser.add_argument("--trial", type=str, default="Static_Training_1_Adaptation_adaptation_Day5_ADAPT1", 
                         help="Exact trial name to filter.")
     parser.add_argument("--save", action="store_true", help="Save the output as a GIF instead of showing it interactively.")
     args = parser.parse_args()
