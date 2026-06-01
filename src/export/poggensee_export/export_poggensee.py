@@ -76,9 +76,11 @@ def estimate_channel_bias(data, threshold=40.0):
     return half_sample_mode(candidates)
 
 
-def export_trial(file_path, output_dir):
+def export_trial(file_path, input_dir, output_dir):
     """Translates a single Pogensee .mat file to a transformed, zero-corrected Parquet file."""
-    print(f"  Processing: {os.path.basename(file_path)}")
+    # Display the relative path so nested files are easy to identify in the console
+    rel_path_for_display = os.path.relpath(file_path, input_dir)
+    print(f"  Processing: {rel_path_for_display}")
     
     try:
         mat_data, is_v73 = load_mat_file(file_path)
@@ -225,9 +227,14 @@ def export_trial(file_path, output_dir):
     if is_v73:
         mat_data.close()
 
-    # Save to disk
-    base_name = os.path.splitext(os.path.basename(file_path))[0]
-    out_file_path = os.path.join(output_dir, f"{base_name}.parquet")
+    # Create safe unique filename based on folder path
+    rel_path = os.path.relpath(file_path, input_dir)
+    rel_path_no_ext = os.path.splitext(rel_path)[0]
+    
+    # Replace slashes, backslashes, and spaces with underscores
+    safe_name = rel_path_no_ext.replace(os.sep, '_').replace('/', '_').replace('\\', '_').replace(' ', '_')
+    out_file_path = os.path.join(output_dir, f"{safe_name}.parquet")
+    
     df.to_parquet(out_file_path, index=False)
     print(f"    Saved Parquet -> {out_file_path}")
 
@@ -264,7 +271,8 @@ def main():
 
     print(f"Found {len(mat_files)} trial file(s) for conversion. Beginning export processing...")
     for file_path in sorted(mat_files):
-        export_trial(file_path, output_dir)
+        # Pass input_dir so we can compute the relative path inside export_trial
+        export_trial(file_path, input_dir, output_dir)
     print("\nExport process completed.")
 
 

@@ -125,7 +125,7 @@ def get_rotated_foot_marker(angle_deg):
     return Path(np.dot(verts, R.T), [Path.MOVETO] + [Path.LINETO]*7 + [Path.CLOSEPOLY])
 
 
-def plot_tufte_symmetric_stride(filename, aggs, mean_stride_dur, mean_duty_factor):
+def plot_tufte_symmetric_stride(filename, aggs, mean_stride_dur, mean_duty_factor, net_bio_watts=None):
     """
     Plots the Symmetrically Aggregated Full Stride energetics.
     Stacks Reference Leg (Solid) and Contralateral Leg (Striped).
@@ -144,6 +144,16 @@ def plot_tufte_symmetric_stride(filename, aggs, mean_stride_dur, mean_duty_facto
     con_hum = np.array(aggs['contra_hum_mean'])
     con_sys = np.array(aggs['contra_sys_mean'])
     con_mus, con_ach = extract_biological_components(con_hum, dt)
+
+    # --- Compute Mechanical Metabolic Estimates ---
+    j_pos_ref = np.trapz(np.maximum(ref_mus, 0), dx=dt)
+    j_neg_ref = abs(np.trapz(np.minimum(ref_mus, 0), dx=dt))
+    
+    j_pos_con = np.trapz(np.maximum(con_mus, 0), dx=dt)
+    j_neg_con = abs(np.trapz(np.minimum(con_mus, 0), dx=dt))
+    
+    # 4x Positive Cost, 1x Negative Cost for muscle
+    est_metabolic_watts = ((4 * j_pos_ref + 1 * j_neg_ref) + (4 * j_pos_con + 1 * j_neg_con)) / mean_stride_dur
 
     # --- Decompose Raw Stride Buffers for Standard Deviation calculations ---
     raw_ref_exo = aggs['raw']['ref_exo']
@@ -342,6 +352,17 @@ def plot_tufte_symmetric_stride(filename, aggs, mean_stride_dur, mean_duty_facto
             
     ax.legend(unique_handles[::-1], unique_labels[::-1], frameon=False, loc="upper left", 
               fontsize=10, labelcolor=NOTION_TEXT, bbox_to_anchor=(0, 1.08), ncol=3)
+
+    # --- 6. Plot Floating Metabolic Cost Estimates Box ---
+    bio_text = f"{net_bio_watts:.1f} W" if net_bio_watts is not None else "N/A"
+    summary_str = (
+        f"Metabolic Cost Estimates\n"
+        f"Mechanical Muscle Cost:  {est_metabolic_watts:.1f} W\n"
+        f"Respirometry Mask (Net):  {bio_text}"
+    )
+    ax.text(0.98, 0.95, summary_str, transform=ax.transAxes,
+            fontsize=10, va='top', ha='right', color=NOTION_TEXT,
+            bbox=dict(boxstyle='round,pad=0.5', facecolor=NOTION_BG, edgecolor='#EDEDED', alpha=0.9))
     
     plt.show()
 
@@ -366,6 +387,27 @@ def main():
         contact_bodies = [col.replace("_force_y", "") for col in force_cols]
         left_body = next((cb for cb in contact_bodies if cb.endswith("_l") or "left" in cb.lower()), contact_bodies[0])
         right_body = next((cb for cb in contact_bodies if cb.endswith("_r") or "right" in cb.lower()), contact_bodies[1])
+
+        # Safely extract respirometry data and compute Biological Power (Weir equation)
+        vo2_col = next((c for c in df.columns if c.lower() == 'vo2'), None)
+        vco2_col = next((c for c in df.columns if c.lower() == 'vco2'), None)
+        
+        net_bio_watts = None
+        if vo2_col:
+            vo2_mean = df[vo2_col].replace(0, np.nan).dropna().mean()
+            vco2_mean = df[vco2_col].replace(0, np.nan).dropna().mean() if vco2_col else 0.85 * vo2_mean
+            
+            if not np.isnan(vo2_mean) and vo2_mean > 0:
+                # Weir Equation: cal/min = 3.941 * VO2(mL/min) + 1.106 * VCO2(mL/min)
+                # Convert to Watts: 1 cal = 4.184 J, 1 min = 60s
+                cal_per_min = 3.941 * vo2_mean + 1.106 * vco2_mean
+                bio_watts = cal_per_min * 4.184 / 60.0
+                net_bio_watts = bio_watts - 70.0  # Subtract 70W assumed basal/standing rate
+                
+                print(f"  Respirometry Data Found:")
+                print(f"    - VO2: {vo2_mean:.1f} mL/min | VCO2: {vco2_mean:.1f} mL/min")
+                print(f"    - Gross Biological Power: {bio_watts:.1f} W")
+                print(f"    - Net Biological Power (Gross - 70W): {net_bio_watts:.1f} W")
 
         times = df["time"].values
         dts = np.diff(times)
@@ -410,7 +452,7 @@ def main():
         if len(analyzer.stride_profiles['ref_sys']) > 0:
             aggs = analyzer.get_stride_aggregates()
             aggs['raw'] = analyzer.stride_profiles 
-            plot_tufte_symmetric_stride(filename, aggs, mean_stride_dur, mean_duty_factor)
+            plot_tufte_symmetric_stride(filename, aggs, mean_stride_dur, mean_duty_factor, net_bio_watts)
 
 if __name__ == "__main__":
     main()
