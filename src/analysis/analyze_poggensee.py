@@ -125,7 +125,7 @@ def get_rotated_foot_marker(angle_deg):
     return Path(np.dot(verts, R.T), [Path.MOVETO] + [Path.LINETO]*7 + [Path.CLOSEPOLY])
 
 
-def plot_tufte_symmetric_stride(filename, aggs, mean_stride_dur, mean_duty_factor, net_bio_watts=None):
+def plot_tufte_symmetric_stride(filename, aggs, mean_stride_dur, mean_duty_factor, net_bio_watts=None, standing_baseline=70.0):
     """
     Plots the Symmetrically Aggregated Full Stride energetics.
     Stacks Reference Leg (Solid) and Contralateral Leg (Striped).
@@ -354,7 +354,7 @@ def plot_tufte_symmetric_stride(filename, aggs, mean_stride_dur, mean_duty_facto
               fontsize=10, labelcolor=NOTION_TEXT, bbox_to_anchor=(0, 1.08), ncol=3)
 
     # --- 6. Plot Floating Metabolic Cost Estimates Box ---
-    bio_text = f"{net_bio_watts:.1f} W" if net_bio_watts is not None else "N/A"
+    bio_text = f"{net_bio_watts:.1f} W (Ref {standing_baseline:.1f} W)" if net_bio_watts is not None else "N/A"
     summary_str = (
         f"Metabolic Cost Estimates\n"
         f"Mechanical Muscle Cost:  {est_metabolic_watts:.1f} W\n"
@@ -388,6 +388,9 @@ def main():
         left_body = next((cb for cb in contact_bodies if cb.endswith("_l") or "left" in cb.lower()), contact_bodies[0])
         right_body = next((cb for cb in contact_bodies if cb.endswith("_r") or "right" in cb.lower()), contact_bodies[1])
 
+        # Extract standing baseline dynamically if provided by exporter, else fallback to 70W
+        standing_baseline = df["qs_baseline_w"].iloc[0] if "qs_baseline_w" in df.columns else 70.0
+
         # Safely extract respirometry data and compute Biological Power (Weir equation)
         vo2_col = next((c for c in df.columns if c.lower() == 'vo2'), None)
         vco2_col = next((c for c in df.columns if c.lower() == 'vco2'), None)
@@ -402,12 +405,12 @@ def main():
                 # Convert to Watts: 1 cal = 4.184 J, 1 min = 60s
                 cal_per_min = 3.941 * vo2_mean + 1.106 * vco2_mean
                 bio_watts = cal_per_min * 4.184 / 60.0
-                net_bio_watts = bio_watts - 70.0  # Subtract 70W assumed basal/standing rate
+                net_bio_watts = bio_watts - standing_baseline
                 
                 print(f"  Respirometry Data Found:")
                 print(f"    - VO2: {vo2_mean:.1f} mL/min | VCO2: {vco2_mean:.1f} mL/min")
                 print(f"    - Gross Biological Power: {bio_watts:.1f} W")
-                print(f"    - Net Biological Power (Gross - 70W): {net_bio_watts:.1f} W")
+                print(f"    - Net Biological Power (Gross - {standing_baseline:.1f}W Baseline): {net_bio_watts:.1f} W")
 
         times = df["time"].values
         dts = np.diff(times)
@@ -452,7 +455,7 @@ def main():
         if len(analyzer.stride_profiles['ref_sys']) > 0:
             aggs = analyzer.get_stride_aggregates()
             aggs['raw'] = analyzer.stride_profiles 
-            plot_tufte_symmetric_stride(filename, aggs, mean_stride_dur, mean_duty_factor, net_bio_watts)
+            plot_tufte_symmetric_stride(filename, aggs, mean_stride_dur, mean_duty_factor, net_bio_watts, standing_baseline)
 
 if __name__ == "__main__":
     main()

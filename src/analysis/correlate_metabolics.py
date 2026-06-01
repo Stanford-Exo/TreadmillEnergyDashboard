@@ -110,7 +110,10 @@ def calculate_window_metrics(df_window, left_body, right_body):
     # 1 cal = 4.184 J, 1 min = 60s
     cal_per_min = 3.941 * vo2_mean + 1.106 * vco2_mean
     bio_watts = cal_per_min * 4.184 / 60.0
-    net_bio_watts = bio_watts - 70.0  # Subtract standing baseline
+    
+    # Check for dynamically extracted QS baseline, otherwise fallback to 70W
+    standing_baseline = df_window["qs_baseline_w"].iloc[0] if "qs_baseline_w" in df_window.columns else 70.0
+    net_bio_watts = bio_watts - standing_baseline
     
     # 2. Run Mechanical Energy Analyzer
     times = df_window["time"].values
@@ -170,7 +173,7 @@ def calculate_window_metrics(df_window, left_body, right_body):
 
 def plot_correlation(scatter_data):
     """
-    Plots the scatter correlation between Estimated Muscle Power and Biological Cost.
+    Plots the scatter correlation between Estimated Mechanical Power and Net Biological Cost.
     """
     fig, ax = plt.subplots(figsize=(9, 7), facecolor=NOTION_BG)
     ax.set_facecolor(NOTION_BG)
