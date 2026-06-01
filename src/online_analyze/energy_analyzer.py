@@ -17,7 +17,8 @@ class EnergyAnalyzer:
         self.stride_profiles = {
             'ref_sys': [], 'contra_sys': [],
             'ref_exo': [], 'contra_exo': [],
-            'ref_hum': [], 'contra_hum': []
+            'ref_hum': [], 'contra_hum': [],
+            'com_x': [], 'com_y': [], 'com_z': []
         }
 
     def update(self, time, forces, cops, dt, exo_power_left=0.0, exo_power_right=0.0):
@@ -56,7 +57,8 @@ class EnergyAnalyzer:
                     'time': [],
                     'ref_sys': [], 'contra_sys': [],
                     'ref_exo': [], 'contra_exo': [],
-                    'ref_hum': [], 'contra_hum': []
+                    'ref_hum': [], 'contra_hum': [],
+                    'com_x': [], 'com_y': [], 'com_z': []
                 }
                 
             # Record states continuously during the stride
@@ -68,6 +70,7 @@ class EnergyAnalyzer:
                 ref_hum = p_hum_l if foot == 'left' else p_hum_r
                 contra_hum = p_hum_r if foot == 'left' else p_hum_l
                 
+                com_excursion = self.kf.com_excursion
                 buf = self.active_strides[foot]
                 buf['time'].append(time)
                 buf['ref_sys'].append(ref_sys)
@@ -76,6 +79,9 @@ class EnergyAnalyzer:
                 buf['contra_exo'].append(contra_exo)
                 buf['ref_hum'].append(ref_hum)
                 buf['contra_hum'].append(contra_hum)
+                buf['com_x'].append(com_excursion[0])
+                buf['com_y'].append(com_excursion[1])
+                buf['com_z'].append(com_excursion[2])
                 
         return {
             'com_pos': self.kf.com_excursion,

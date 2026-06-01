@@ -115,6 +115,23 @@ def compile_window_row(df_win, analyzer, trial_name, window_start_s):
     ref_exo_raw = np.array(profiles['ref_exo'])
     con_exo_raw = np.array(profiles['contra_exo'])
 
+    com_x_raw = np.array(profiles['com_x'])
+    com_y_raw = np.array(profiles['com_y'])
+    com_z_raw = np.array(profiles['com_z'])
+
+    com_x_mean_raw = np.mean(com_x_raw, axis=0)
+    com_y_mean_raw = np.mean(com_y_raw, axis=0)
+    com_z_mean_raw = np.mean(com_z_raw, axis=0)
+
+    # Center the averaged trajectories around 0
+    com_x_centered = com_x_mean_raw - np.mean(com_x_mean_raw)
+    com_y_centered = com_y_mean_raw - np.mean(com_y_mean_raw)
+    com_z_centered = com_z_mean_raw - np.mean(com_z_mean_raw)
+
+    com_x_std = np.std(com_x_raw, axis=0)
+    com_y_std = np.std(com_y_raw, axis=0)
+    com_z_std = np.std(com_z_raw, axis=0)
+
     ref_mus_raw, ref_ach_raw = [], []
     for rh in profiles['ref_hum']:
         rm, ra = extract_biological_components(rh, dt_stride)
@@ -168,7 +185,7 @@ def compile_window_row(df_win, analyzer, trial_name, window_start_s):
         'exo_power': exo_power_net
     }
 
-    # Inject all 1200 1D bucket columns
+    # Inject all 1D bucket columns
     for i in range(100):
         row[f'ref_exo_w_{i:02d}'] = ref_exo_mean[i]
         row[f'ref_ach_w_{i:02d}'] = ref_ach_mean[i]
@@ -183,6 +200,15 @@ def compile_window_row(df_win, analyzer, trial_name, window_start_s):
         row[f'con_exo_std_{i:02d}'] = con_exo_std[i]
         row[f'con_ach_std_{i:02d}'] = con_ach_std[i]
         row[f'con_mus_std_{i:02d}'] = con_mus_std[i]
+
+        # Center of Mass (COM) Excursion (Zero-Centered)
+        row[f'com_x_w_{i:02d}'] = com_x_centered[i]
+        row[f'com_y_w_{i:02d}'] = com_y_centered[i]
+        row[f'com_z_w_{i:02d}'] = com_z_centered[i]
+
+        row[f'com_x_std_{i:02d}'] = com_x_std[i]
+        row[f'com_y_std_{i:02d}'] = com_y_std[i]
+        row[f'com_z_std_{i:02d}'] = com_z_std[i]
 
     return row
 
