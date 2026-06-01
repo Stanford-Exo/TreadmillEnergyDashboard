@@ -32,19 +32,86 @@ NOTION_SUBTEXT = "#787774"
 
 # Pastel Solid Colors (Reference Leg)
 NOTION_REF_EXO = "#D3E5EF"      
-NOTION_REF_HUM = "#D4B89F"      
+NOTION_REF_ACH = "#EBE0C5"  # Lighter, elastic golden-beige
+NOTION_REF_MUS = "#D4B89F"  # Deeper, active reddish-brown
 
 # Lighter hatched faces with slightly darker edges (Contralateral Leg)
 NOTION_CON_EXO_FACE = "#F2F6F9"
 NOTION_CON_EXO_EDGE = "#8EB0C6"
-NOTION_CON_HUM_FACE = "#F7F2EE"
-NOTION_CON_HUM_EDGE = "#B59475"
+NOTION_CON_ACH_FACE = "#FDFBEF"
+NOTION_CON_ACH_EDGE = "#D1C090"
+NOTION_CON_MUS_FACE = "#F7F2EE"
+NOTION_CON_MUS_EDGE = "#B59475"
 
 TEXT_COLOR_EXO = "#3A637A"
-TEXT_COLOR_HUM = "#7A583A"
+TEXT_COLOR_ACH = "#9E814D"
+TEXT_COLOR_MUS = "#7A583A"
+
 
 def find_zero_crossings(y):
     return np.where(np.diff(np.sign(y)))[0]
+
+
+def extract_biological_components(human_power, dt):
+    """
+    Splits human power into 'Likely Achilles' (balanced zero-net energy) and 'Muscle Power'.
+    Achilles acts as a spring matching the negative loading lump with the positive push-off lump.
+    We double the array to smoothly handle contralateral phase wrapping across the 0/100 boundary.
+    """
+    N = len(human_power)
+    doubled_power = np.concatenate([human_power, human_power])
+    achilles_doubled = np.zeros_like(doubled_power)
+    
+    # Peak positive power between N//2 and 3N//2 ensures we have space backwards and forwards
+    search_area = doubled_power[N//2 : N + N//2]
+    if len(search_area) == 0:
+        return human_power, np.zeros_like(human_power)
+        
+    peak_local = np.argmax(search_area)
+    peak_idx = N//2 + peak_local
+    
+    # If the absolute peak is negative or zero, there's no push-off. Achilles = 0
+    if doubled_power[peak_idx] <= 0:
+        return human_power, np.zeros_like(human_power)
+        
+    crossings = find_zero_crossings(doubled_power)
+    boundaries = [0] + [c + 1 for c in crossings] + [2 * N]
+    
+    pos_start, pos_end = -1, -1
+    neg_start, neg_end = -1, -1
+    
+    for i in range(len(boundaries) - 1):
+        if boundaries[i] <= peak_idx < boundaries[i+1]:
+            pos_start = boundaries[i]
+            pos_end = boundaries[i+1]
+            if i > 0:
+                neg_start = boundaries[i-1]
+                neg_end = boundaries[i]
+            break
+            
+    if pos_start != -1 and neg_start != -1:
+        pos_chunk = doubled_power[pos_start:pos_end]
+        neg_chunk = doubled_power[neg_start:neg_end]
+        
+        e_pos = np.trapz(pos_chunk, dx=dt)
+        e_neg = np.trapz(neg_chunk, dx=dt)
+        
+        # e_neg must actually be negative for it to be elastic storage
+        if e_pos > 0 and e_neg < 0:
+            achilles_energy = min(e_pos, abs(e_neg))
+            
+            scale_pos = achilles_energy / e_pos if e_pos != 0 else 0
+            scale_neg = achilles_energy / abs(e_neg) if e_neg != 0 else 0
+            
+            achilles_doubled[pos_start:pos_end] = pos_chunk * scale_pos
+            achilles_doubled[neg_start:neg_end] = neg_chunk * scale_neg
+            
+    # Fold the doubled array back onto the 0-100% boundary
+    achilles_power = achilles_doubled[:N] + achilles_doubled[N:]
+    muscle_power = human_power - achilles_power
+    
+    return muscle_power, achilles_power
+
 
 def get_rotated_foot_marker(angle_deg):
     verts = np.array([
@@ -57,28 +124,43 @@ def get_rotated_foot_marker(angle_deg):
     R = np.array([[c, -s], [s, c]])
     return Path(np.dot(verts, R.T), [Path.MOVETO] + [Path.LINETO]*7 + [Path.CLOSEPOLY])
 
+
 def plot_tufte_symmetric_stride(filename, aggs, mean_stride_dur, mean_duty_factor):
     """
     Plots the Symmetrically Aggregated Full Stride energetics.
     Stacks Reference Leg (Solid) and Contralateral Leg (Striped).
     """
+    dt = mean_stride_dur / 100.0  
     stride_pct = np.linspace(0, 100, 100)
     
-    # Reference Leg Averages
+    # --- Reference Leg Averages ---
     ref_exo = np.array(aggs['ref_exo_mean'])
     ref_hum = np.array(aggs['ref_hum_mean'])
     ref_sys = np.array(aggs['ref_sys_mean'])
+    ref_mus, ref_ach = extract_biological_components(ref_hum, dt)
     
-    # Contralateral Leg Averages
+    # --- Contralateral Leg Averages ---
     con_exo = np.array(aggs['contra_exo_mean'])
     con_hum = np.array(aggs['contra_hum_mean'])
     con_sys = np.array(aggs['contra_sys_mean'])
+    con_mus, con_ach = extract_biological_components(con_hum, dt)
 
-    # Raw arrays for calculating standard deviations
+    # --- Decompose Raw Stride Buffers for Standard Deviation calculations ---
     raw_ref_exo = aggs['raw']['ref_exo']
-    raw_ref_hum = aggs['raw']['ref_hum']
+    raw_ref_ach = []
+    raw_ref_mus = []
+    for rh in aggs['raw']['ref_hum']:
+        rm, ra = extract_biological_components(np.array(rh), dt)
+        raw_ref_mus.append(rm)
+        raw_ref_ach.append(ra)
+        
     raw_con_exo = aggs['raw']['contra_exo']
-    raw_con_hum = aggs['raw']['contra_hum']
+    raw_con_ach = []
+    raw_con_mus = []
+    for ch in aggs['raw']['contra_hum']:
+        cm, ca = extract_biological_components(np.array(ch), dt)
+        raw_con_mus.append(cm)
+        raw_con_ach.append(ca)
 
     # Total System (Net)
     tot_sys = ref_sys + con_sys
@@ -88,7 +170,9 @@ def plot_tufte_symmetric_stride(filename, aggs, mean_stride_dur, mean_duty_facto
     
     fig.text(0.04, 0.93, f"Bilateral System Energetics: {filename}", fontsize=16, fontweight='bold', color=NOTION_TEXT)
     fig.text(0.04, 0.88, "Full Stride Cycle: Reference Leg (Solid) & Contralateral Leg (Striped) in Stationary Frame", fontsize=12, color=NOTION_SUBTEXT)
-    plt.subplots_adjust(top=0.80, bottom=0.18)
+    
+    # Margins expanded slightly to fit new Contra labels cleanly
+    plt.subplots_adjust(top=0.77, bottom=0.20)
 
     for spine in ['top', 'right', 'bottom', 'left']:
         ax.spines[spine].set_visible(False)
@@ -102,95 +186,149 @@ def plot_tufte_symmetric_stride(filename, aggs, mean_stride_dur, mean_duty_facto
     z = np.zeros(100)
     
     pos_ref_exo = np.maximum(ref_exo, 0)
-    pos_ref_hum = pos_ref_exo + np.maximum(ref_hum, 0)
-    pos_con_exo = pos_ref_hum + np.maximum(con_exo, 0)
-    pos_con_hum = pos_con_exo + np.maximum(con_hum, 0)
+    pos_ref_ach = pos_ref_exo + np.maximum(ref_ach, 0)
+    pos_ref_mus = pos_ref_ach + np.maximum(ref_mus, 0)
+    
+    pos_con_exo = pos_ref_mus + np.maximum(con_exo, 0)
+    pos_con_ach = pos_con_exo + np.maximum(con_ach, 0)
+    pos_con_mus = pos_con_ach + np.maximum(con_mus, 0)
 
     neg_ref_exo = np.minimum(ref_exo, 0)
-    neg_ref_hum = neg_ref_exo + np.minimum(ref_hum, 0)
-    neg_con_exo = neg_ref_hum + np.minimum(con_exo, 0)
-    neg_con_hum = neg_con_exo + np.minimum(con_hum, 0)
+    neg_ref_ach = neg_ref_exo + np.minimum(ref_ach, 0)
+    neg_ref_mus = neg_ref_ach + np.minimum(ref_mus, 0)
+    
+    neg_con_exo = neg_ref_mus + np.minimum(con_exo, 0)
+    neg_con_ach = neg_con_exo + np.minimum(con_ach, 0)
+    neg_con_mus = neg_con_ach + np.minimum(con_mus, 0)
+
+    # Calculate padding bounds to keep data below the legend and limit vertical lines
+    max_power = max(np.max(pos_ref_mus), np.max(pos_con_mus), np.max(tot_sys))
+    min_power = min(np.min(neg_ref_mus), np.min(neg_con_mus), np.min(tot_sys))
+    
+    y_upper = max_power * 1.45  # 45% headroom specifically for the legend
+    y_lower = min_power * 1.15  # 15% footroom below the deepest negative power
+    
+    ax.set_ylim(y_lower, y_upper)
 
     # --- 2. Fill Polygons ---
+    # Reference Fills
     ax.fill_between(stride_pct, z, pos_ref_exo, color=NOTION_REF_EXO, alpha=0.95, linewidth=0, label="Ref Leg Exo")
-    ax.fill_between(stride_pct, pos_ref_exo, pos_ref_hum, color=NOTION_REF_HUM, alpha=0.95, linewidth=0, label="Ref Leg Human")
-    ax.fill_between(stride_pct, pos_ref_hum, pos_con_exo, facecolor=NOTION_CON_EXO_FACE, edgecolor=NOTION_CON_EXO_EDGE, hatch='////', linewidth=0.5, label="Contra Leg Exo")
-    ax.fill_between(stride_pct, pos_con_exo, pos_con_hum, facecolor=NOTION_CON_HUM_FACE, edgecolor=NOTION_CON_HUM_EDGE, hatch='////', linewidth=0.5, label="Contra Leg Human")
+    ax.fill_between(stride_pct, pos_ref_exo, pos_ref_ach, color=NOTION_REF_ACH, alpha=0.95, linewidth=0, label="Ref Leg Likely Achilles")
+    ax.fill_between(stride_pct, pos_ref_ach, pos_ref_mus, color=NOTION_REF_MUS, alpha=0.95, linewidth=0, label="Ref Leg Muscle")
 
+    # Contralateral Fills
+    ax.fill_between(stride_pct, pos_ref_mus, pos_con_exo, facecolor=NOTION_CON_EXO_FACE, edgecolor=NOTION_CON_EXO_EDGE, hatch='////', linewidth=0.5, label="Contra Leg Exo")
+    ax.fill_between(stride_pct, pos_con_exo, pos_con_ach, facecolor=NOTION_CON_ACH_FACE, edgecolor=NOTION_CON_ACH_EDGE, hatch='////', linewidth=0.5, label="Contra Leg Likely Achilles")
+    ax.fill_between(stride_pct, pos_con_ach, pos_con_mus, facecolor=NOTION_CON_MUS_FACE, edgecolor=NOTION_CON_MUS_EDGE, hatch='////', linewidth=0.5, label="Contra Leg Muscle")
+
+    # Negative Fills
     ax.fill_between(stride_pct, z, neg_ref_exo, color=NOTION_REF_EXO, alpha=0.95, linewidth=0)
-    ax.fill_between(stride_pct, neg_ref_exo, neg_ref_hum, color=NOTION_REF_HUM, alpha=0.95, linewidth=0)
-    ax.fill_between(stride_pct, neg_ref_hum, neg_con_exo, facecolor=NOTION_CON_EXO_FACE, edgecolor=NOTION_CON_EXO_EDGE, hatch='////', linewidth=0.5)
-    ax.fill_between(stride_pct, neg_con_exo, neg_con_hum, facecolor=NOTION_CON_HUM_FACE, edgecolor=NOTION_CON_HUM_EDGE, hatch='////', linewidth=0.5)
+    ax.fill_between(stride_pct, neg_ref_exo, neg_ref_ach, color=NOTION_REF_ACH, alpha=0.95, linewidth=0)
+    ax.fill_between(stride_pct, neg_ref_ach, neg_ref_mus, color=NOTION_REF_MUS, alpha=0.95, linewidth=0)
+
+    ax.fill_between(stride_pct, neg_ref_mus, neg_con_exo, facecolor=NOTION_CON_EXO_FACE, edgecolor=NOTION_CON_EXO_EDGE, hatch='////', linewidth=0.5)
+    ax.fill_between(stride_pct, neg_con_exo, neg_con_ach, facecolor=NOTION_CON_ACH_FACE, edgecolor=NOTION_CON_ACH_EDGE, hatch='////', linewidth=0.5)
+    ax.fill_between(stride_pct, neg_con_ach, neg_con_mus, facecolor=NOTION_CON_MUS_FACE, edgecolor=NOTION_CON_MUS_EDGE, hatch='////', linewidth=0.5)
 
     # --- 3. Net System Power Line ---
     ax.plot(stride_pct, tot_sys, color="#111827", linestyle=":", linewidth=2.5, label="Net System Power", zorder=10)
 
     # --- 4. Draw Centered Text Labels ---
     stroke = [pe.withStroke(linewidth=3, foreground=NOTION_BG, alpha=0.8)]
-    dt = mean_stride_dur / 100.0  
     
-    def label_blocks(sys_curve, exo_curve, hum_curve, raw_exo, raw_hum, pos_base, pos_top, neg_base, neg_top, t_color_exo, t_color_hum):
+    def label_blocks(sys_curve, exo_curve, ach_curve, mus_curve, 
+                     raw_exo, raw_ach, raw_mus, 
+                     pos_exo_base, pos_ach_base, pos_mus_base, 
+                     neg_exo_base, neg_ach_base, neg_mus_base, 
+                     t_color_exo, t_color_ach, t_color_mus):
+        
         crossings = find_zero_crossings(sys_curve)
-        boundaries = [0] + list(crossings) + [len(sys_curve)-1]
+        boundaries = [0] + [c + 1 for c in crossings] + [len(sys_curve)]
         
         for i in range(len(boundaries) - 1):
             start, end = boundaries[i], boundaries[i+1]
             if (end - start) < 5: continue
             
             exo_j_list = [np.trapz(raw_exo[s_idx][start:end], dx=dt) for s_idx in range(len(raw_exo))]
-            hum_j_list = [np.trapz(raw_hum[s_idx][start:end], dx=dt) for s_idx in range(len(raw_hum))]
+            ach_j_list = [np.trapz(raw_ach[s_idx][start:end], dx=dt) for s_idx in range(len(raw_ach))]
+            mus_j_list = [np.trapz(raw_mus[s_idx][start:end], dx=dt) for s_idx in range(len(raw_mus))]
             
             m_exo_j, s_exo_j = np.mean(exo_j_list), np.std(exo_j_list)
-            m_hum_j, s_hum_j = np.mean(hum_j_list), np.std(hum_j_list)
+            m_ach_j, s_ach_j = np.mean(ach_j_list), np.std(ach_j_list)
+            m_mus_j, s_mus_j = np.mean(mus_j_list), np.std(mus_j_list)
             
             peak_idx = start + np.argmax(np.abs(sys_curve[start:end]))
             cx = stride_pct[peak_idx]
             
             p_e = exo_curve[peak_idx]
-            p_h = hum_curve[peak_idx]
+            p_a = ach_curve[peak_idx]
+            p_m = mus_curve[peak_idx]
             
-            y_exo = pos_base[peak_idx] + p_e/2 if p_e > 0 else neg_base[peak_idx] + p_e/2
-            y_hum = pos_top[peak_idx] + p_h/2 if p_h > 0 else neg_top[peak_idx] + p_h/2
+            y_exo = pos_exo_base[peak_idx] + p_e/2 if p_e > 0 else neg_exo_base[peak_idx] + p_e/2
+            y_ach = pos_ach_base[peak_idx] + p_a/2 if p_a > 0 else neg_ach_base[peak_idx] + p_a/2
+            y_mus = pos_mus_base[peak_idx] + p_m/2 if p_m > 0 else neg_mus_base[peak_idx] + p_m/2
                 
             if abs(m_exo_j) >= 0.5 and abs(p_e) >= 4.0:
                 ax.text(cx, y_exo, f"{m_exo_j:+.1f} J\n±{s_exo_j:.1f} J", color=t_color_exo, fontsize=9, fontweight='bold', ha='center', va='center', path_effects=stroke, zorder=15)
-            if abs(m_hum_j) >= 0.5 and abs(p_h) >= 4.0:
-                ax.text(cx, y_hum, f"{m_hum_j:+.1f} J\n±{s_hum_j:.1f} J", color=t_color_hum, fontsize=9, fontweight='bold', ha='center', va='center', path_effects=stroke, zorder=15)
+            if abs(m_ach_j) >= 0.5 and abs(p_a) >= 4.0:
+                ax.text(cx, y_ach, f"{m_ach_j:+.1f} J\n±{s_ach_j:.1f} J", color=t_color_ach, fontsize=9, fontweight='bold', ha='center', va='center', path_effects=stroke, zorder=15)
+            if abs(m_mus_j) >= 0.5 and abs(p_m) >= 4.0:
+                ax.text(cx, y_mus, f"{m_mus_j:+.1f} J\n±{s_mus_j:.1f} J", color=t_color_mus, fontsize=9, fontweight='bold', ha='center', va='center', path_effects=stroke, zorder=15)
 
-    label_blocks(ref_sys, ref_exo, ref_hum, raw_ref_exo, raw_ref_hum,
-                 pos_base=z, pos_top=pos_ref_exo, neg_base=z, neg_top=neg_ref_exo, 
-                 t_color_exo=TEXT_COLOR_EXO, t_color_hum=TEXT_COLOR_HUM)
+    label_blocks(ref_sys, ref_exo, ref_ach, ref_mus, 
+                 raw_ref_exo, raw_ref_ach, raw_ref_mus,
+                 pos_exo_base=z, pos_ach_base=pos_ref_exo, pos_mus_base=pos_ref_ach, 
+                 neg_exo_base=z, neg_ach_base=neg_ref_exo, neg_mus_base=neg_ref_ach, 
+                 t_color_exo=TEXT_COLOR_EXO, t_color_ach=TEXT_COLOR_ACH, t_color_mus=TEXT_COLOR_MUS)
     
-    label_blocks(con_sys, con_exo, con_hum, raw_con_exo, raw_con_hum,
-                 pos_base=pos_ref_hum, pos_top=pos_con_exo, neg_base=neg_ref_hum, neg_top=neg_con_exo, 
-                 t_color_exo=TEXT_COLOR_EXO, t_color_hum=TEXT_COLOR_HUM)
+    label_blocks(con_sys, con_exo, con_ach, con_mus, 
+                 raw_con_exo, raw_con_ach, raw_con_mus,
+                 pos_exo_base=pos_ref_mus, pos_ach_base=pos_con_exo, pos_mus_base=pos_con_ach, 
+                 neg_exo_base=neg_ref_mus, neg_ach_base=neg_con_exo, neg_mus_base=neg_con_ach, 
+                 t_color_exo=TEXT_COLOR_EXO, t_color_ach=TEXT_COLOR_ACH, t_color_mus=TEXT_COLOR_MUS)
 
     # --- 5. Custom X-Axis formatting (Ticks and Foot Icons) ---
     ax.set_xlim(0, 100) 
     
     duty_pct = mean_duty_factor * 100
-    ax.set_xticks([0, duty_pct, 100])
+    contra_hs = 50.0  # Idealized 50% offset
+    contra_to = (duty_pct + 50.0) % 100.0
+
+    ax.set_xticks([0, contra_to, contra_hs, duty_pct, 100])
     ax.set_xticklabels([]) 
     
-    # Tick lines dropping down
-    ax.axvline(0, color='black', linewidth=1.5, linestyle='-', zorder=5)
-    ax.axvline(duty_pct, color='black', linewidth=1.5, linestyle='-', zorder=5)
-    ax.axvline(100, color='black', linewidth=1.5, linestyle='-', zorder=5)
+    # Tick lines dropping down capped 10% above the peak to avoid legend overlap
+    line_top = max_power * 1.10
+    
+    ax.vlines([0, duty_pct, 100], ymin=y_lower, ymax=line_top, colors='black', linewidths=1.5, linestyles='-', zorder=5)
+    ax.vlines([contra_to, contra_hs], ymin=y_lower, ymax=line_top, colors=NOTION_SUBTEXT, linewidths=1.5, linestyles='--', alpha=0.8, zorder=5)
 
     # Place Foot Icons & Labels
     icon_y_pos = -0.12
     text_y_pos = -0.22
     
-    ax.scatter(0, icon_y_pos, s=700, marker=get_rotated_foot_marker(-25), color=NOTION_TEXT, transform=ax.get_xaxis_transform(), clip_on=False)
+    # 1. Reference Heel-Strike (0%)
+    ax.scatter(0, icon_y_pos, s=700, marker=get_rotated_foot_marker(-25), facecolors=NOTION_TEXT, edgecolors='none', transform=ax.get_xaxis_transform(), clip_on=False)
     ax.text(0, text_y_pos, "Heel-Strike", transform=ax.get_xaxis_transform(), ha='center', va='top', color=NOTION_TEXT, fontsize=11, fontweight='500')
     
-    ax.scatter(duty_pct, icon_y_pos, s=700, marker=get_rotated_foot_marker(30), color=NOTION_TEXT, transform=ax.get_xaxis_transform(), clip_on=False)
+    # 2. Contralateral Toe-Off (~10-15%)
+    ax.scatter(contra_to, icon_y_pos, s=700, marker=get_rotated_foot_marker(30), facecolors='none', edgecolors=NOTION_SUBTEXT, linestyles='--', linewidths=1.5, transform=ax.get_xaxis_transform(), clip_on=False)
+    ax.text(contra_to, text_y_pos, "Contra\nToe-Off", transform=ax.get_xaxis_transform(), ha='center', va='top', color=NOTION_SUBTEXT, fontsize=10, fontweight='500')
+    
+    # 3. Contralateral Heel-Strike (50%)
+    ax.scatter(contra_hs, icon_y_pos, s=700, marker=get_rotated_foot_marker(-25), facecolors='none', edgecolors=NOTION_SUBTEXT, linestyles='--', linewidths=1.5, transform=ax.get_xaxis_transform(), clip_on=False)
+    ax.text(contra_hs, text_y_pos, "Contra\nHeel-Strike", transform=ax.get_xaxis_transform(), ha='center', va='top', color=NOTION_SUBTEXT, fontsize=10, fontweight='500')
+
+    # 4. Reference Toe-Off (duty_pct)
+    ax.scatter(duty_pct, icon_y_pos, s=700, marker=get_rotated_foot_marker(30), facecolors=NOTION_TEXT, edgecolors='none', transform=ax.get_xaxis_transform(), clip_on=False)
     ax.text(duty_pct, text_y_pos, "Toe-Off", transform=ax.get_xaxis_transform(), ha='center', va='top', color=NOTION_TEXT, fontsize=11, fontweight='500')
 
-    ax.scatter(100, icon_y_pos, s=700, marker=get_rotated_foot_marker(-25), color=NOTION_TEXT, transform=ax.get_xaxis_transform(), clip_on=False)
+    # 5. Reference Heel-Strike (100%)
+    ax.scatter(100, icon_y_pos, s=700, marker=get_rotated_foot_marker(-25), facecolors=NOTION_TEXT, edgecolors='none', transform=ax.get_xaxis_transform(), clip_on=False)
     ax.text(100, text_y_pos, "Heel-Strike", transform=ax.get_xaxis_transform(), ha='center', va='top', color=NOTION_TEXT, fontsize=11, fontweight='500')
 
-    ax.text(0.5, -0.35, "Full Stride Cycle (%)", transform=ax.transAxes, ha='center', va='top', color=NOTION_SUBTEXT, fontsize=11, fontweight='bold')
+    # X-Axis Title
+    ax.text(0.5, -0.38, "Full Stride Cycle (%)", transform=ax.transAxes, ha='center', va='top', color=NOTION_SUBTEXT, fontsize=11, fontweight='bold')
     
     ax.set_ylabel("Mechanical Power (W)", fontsize=11, fontweight='bold', color=NOTION_TEXT)
     ax.axhline(0, color=NOTION_TEXT, linewidth=1.5) 
@@ -203,9 +341,10 @@ def plot_tufte_symmetric_stride(filename, aggs, mean_stride_dur, mean_duty_facto
             unique_handles.append(h)
             
     ax.legend(unique_handles[::-1], unique_labels[::-1], frameon=False, loc="upper left", 
-              fontsize=11, labelcolor=NOTION_TEXT, bbox_to_anchor=(0, 1.05), ncol=5)
+              fontsize=10, labelcolor=NOTION_TEXT, bbox_to_anchor=(0, 1.08), ncol=3)
     
     plt.show()
+
 
 def main():
     parser = argparse.ArgumentParser(description="Analyze Poggensee exoskeleton trial datasets.")
