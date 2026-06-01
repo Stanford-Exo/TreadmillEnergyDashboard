@@ -6,18 +6,18 @@ from online_analyze.stride_analyzer import StrideAnalyzer
 class EnergyAnalyzer:
     """
     Computes real-time overground powers and symmetrically aggregates 
-    Stance and Swing phase energetics across both legs.
+    energetics across full stride cycles for both legs.
     """
     def __init__(self, initial_mass=70.0, contact_threshold=30.0, foot_roll_length=0.254, num_gait_points=100):
         self.kf = ComKalmanFilter(initial_mass=initial_mass)
         self.stride_analyzer = StrideAnalyzer(contact_threshold=contact_threshold, foot_roll_length=foot_roll_length)
         self.num_gait_points = num_gait_points
         
-        self.active_stances = {'left': None, 'right': None}
-        self.stance_profiles = {
-            'stance_sys': [], 'swing_sys': [],
-            'stance_exo': [], 'swing_exo': [],
-            'stance_hum': [], 'swing_hum': []
+        self.active_strides = {'left': None, 'right': None}
+        self.stride_profiles = {
+            'ref_sys': [], 'contra_sys': [],
+            'ref_exo': [], 'contra_exo': [],
+            'ref_hum': [], 'contra_hum': []
         }
 
     def update(self, time, forces, cops, dt, exo_power_left=0.0, exo_power_right=0.0):
@@ -38,48 +38,44 @@ class EnergyAnalyzer:
         # 2. Compute Instantaneous Powers
         p_sys_l = float(np.dot(forces['left'], v_com_overground))
         p_sys_r = float(np.dot(forces['right'], v_com_overground))
-        
         p_hum_l = p_sys_l - exo_power_left
         p_hum_r = p_sys_r - exo_power_right
         
-        # 3. Process Symmetric Stance Buffers
+        # 3. Process Symmetric Full-Stride Buffers
         for foot in ['left', 'right']:
-            # Heel Strike: Initialize a new stance window
+            # Heel Strike: Close previous stride and start a new one
             if is_active[foot] and not was_active[foot]:
-                self.active_stances[foot] = {
-                    'time': [],
-                    'stance_sys': [], 'swing_sys': [],
-                    'stance_exo': [], 'swing_exo': [],
-                    'stance_hum': [], 'swing_hum': []
-                }
-                
-            # Mid-Stance: Record states
-            if is_active[foot] and self.active_stances[foot] is not None:
-                stance_sys = p_sys_l if foot == 'left' else p_sys_r
-                swing_sys  = p_sys_r if foot == 'left' else p_sys_l
-                stance_exo = exo_power_left if foot == 'left' else exo_power_right
-                swing_exo  = exo_power_right if foot == 'left' else exo_power_left
-                stance_hum = p_hum_l if foot == 'left' else p_hum_r
-                swing_hum  = p_hum_r if foot == 'left' else p_hum_l
-                
-                buf = self.active_stances[foot]
-                buf['time'].append(time)
-                buf['stance_sys'].append(stance_sys)
-                buf['swing_sys'].append(swing_sys)
-                buf['stance_exo'].append(stance_exo)
-                buf['swing_exo'].append(swing_exo)
-                buf['stance_hum'].append(stance_hum)
-                buf['swing_hum'].append(swing_hum)
-                
-            # Toe-Off: Resample and commit to aggregated profiles
-            if not is_active[foot] and was_active[foot]:
-                buf = self.active_stances[foot]
+                buf = self.active_strides[foot]
                 if buf is not None and len(buf['time']) > 15:
                     t_arr = np.array(buf['time'])
-                    for k in self.stance_profiles.keys():
+                    for k in self.stride_profiles.keys():
                         resampled = self._resample_array(t_arr, np.array(buf[k]))
-                        self.stance_profiles[k].append(resampled)
-                self.active_stances[foot] = None
+                        self.stride_profiles[k].append(resampled)
+                        
+                self.active_strides[foot] = {
+                    'time': [],
+                    'ref_sys': [], 'contra_sys': [],
+                    'ref_exo': [], 'contra_exo': [],
+                    'ref_hum': [], 'contra_hum': []
+                }
+                
+            # Record states continuously during the stride
+            if self.active_strides[foot] is not None:
+                ref_sys = p_sys_l if foot == 'left' else p_sys_r
+                contra_sys = p_sys_r if foot == 'left' else p_sys_l
+                ref_exo = exo_power_left if foot == 'left' else exo_power_right
+                contra_exo = exo_power_right if foot == 'left' else exo_power_left
+                ref_hum = p_hum_l if foot == 'left' else p_hum_r
+                contra_hum = p_hum_r if foot == 'left' else p_hum_l
+                
+                buf = self.active_strides[foot]
+                buf['time'].append(time)
+                buf['ref_sys'].append(ref_sys)
+                buf['contra_sys'].append(contra_sys)
+                buf['ref_exo'].append(ref_exo)
+                buf['contra_exo'].append(contra_exo)
+                buf['ref_hum'].append(ref_hum)
+                buf['contra_hum'].append(contra_hum)
                 
         return {
             'com_pos': self.kf.com_excursion,
@@ -102,10 +98,10 @@ class EnergyAnalyzer:
         target_times = np.linspace(0.0, 1.0, self.num_gait_points)
         return np.interp(target_times, norm_times, values)
 
-    def get_stance_aggregates(self):
-        """Returns standard arrays representing 0-100% of the Stance Phase."""
+    def get_stride_aggregates(self):
+        """Returns standard arrays representing 0-100% of the Stride Phase."""
         aggregates = {}
-        for key, profiles in self.stance_profiles.items():
+        for key, profiles in self.stride_profiles.items():
             if len(profiles) > 0:
                 profiles_arr = np.array(profiles)
                 aggregates[f"{key}_mean"] = np.mean(profiles_arr, axis=0).tolist()
