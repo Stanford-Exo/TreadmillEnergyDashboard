@@ -4,6 +4,8 @@ import argparse
 import glob
 import os
 import sys
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
@@ -16,17 +18,64 @@ from online_analyze.energy_analyzer import EnergyAnalyzer
 
 POGGENSEE_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, "../../exported_pogensee"))
 
+# --- Numba JIT Optimization ---
+# We push the heaviest per-stride mathematical extraction into LLVM compiled code
+try:
+    import numba as nb
 
+    USE_NUMBA = True
+except ImportError:
+    USE_NUMBA = False
+    print(
+        "Warning: 'numba' is not installed. Math operations will fall back to standard Python."
+    )
+    print("For maximum cluster speed, please run: pip install numba")
+
+
+def njit_opt(func):
+    if USE_NUMBA:
+        return nb.njit(cache=True)(func)
+    return func
+
+
+@njit_opt
+def trapz_1d(y, dx):
+    """JIT-compiled trapezoidal integration."""
+    n = len(y)
+    if n < 2:
+        return 0.0
+    s = 0.0
+    for i in range(n - 1):
+        s += y[i] + y[i + 1]
+    return s * dx * 0.5
+
+
+@njit_opt
 def find_zero_crossings(y):
-    return np.where(np.diff(np.sign(y)))[0]
+    """JIT-compiled fast zero-crossing detector."""
+    n = len(y)
+    crossings = np.zeros(n, dtype=np.int64)
+    count = 0
+    for i in range(n - 1):
+        if (y[i + 1] > 0 and y[i] <= 0) or (y[i + 1] < 0 and y[i] >= 0):
+            crossings[count] = i
+            count += 1
+    return crossings[:count]
 
 
+@njit_opt
 def extract_biological_components(human_power, dt):
     """
     Splits human power into 'Likely Achilles' (balanced zero-net energy) and 'Muscle Power'.
+    Heavily optimized for Numba JIT execution.
     """
+    human_power = np.asarray(human_power, dtype=np.float64)
     N = len(human_power)
-    doubled_power = np.concatenate([human_power, human_power])
+
+    doubled_power = np.zeros(2 * N, dtype=np.float64)
+    doubled_power[:N] = human_power
+    doubled_power[N:] = human_power
+
     achilles_doubled = np.zeros_like(doubled_power)
 
     search_area = doubled_power[N // 2 : N + N // 2]
@@ -40,13 +89,21 @@ def extract_biological_components(human_power, dt):
         return human_power, np.zeros_like(human_power)
 
     crossings = find_zero_crossings(doubled_power)
-    boundaries = [0] + [c + 1 for c in crossings] + [2 * N]
 
-    pos_start, pos_end = -1, -1
-    neg_start, neg_end = -1, -1
+    # Build boundaries array safely within nopython mode
+    boundaries = np.zeros(len(crossings) + 2, dtype=np.int64)
+    boundaries[0] = 0
+    for i in range(len(crossings)):
+        boundaries[i + 1] = crossings[i] + 1
+    boundaries[-1] = 2 * N
+
+    pos_start = -1
+    pos_end = -1
+    neg_start = -1
+    neg_end = -1
 
     for i in range(len(boundaries) - 1):
-        if boundaries[i] <= peak_idx < boundaries[i + 1]:
+        if boundaries[i] <= peak_idx and peak_idx < boundaries[i + 1]:
             pos_start = boundaries[i]
             pos_end = boundaries[i + 1]
             if i > 0:
@@ -58,19 +115,25 @@ def extract_biological_components(human_power, dt):
         pos_chunk = doubled_power[pos_start:pos_end]
         neg_chunk = doubled_power[neg_start:neg_end]
 
-        e_pos = np.trapz(pos_chunk, dx=dt)
-        e_neg = np.trapz(neg_chunk, dx=dt)
+        e_pos = trapz_1d(pos_chunk, dt)
+        e_neg = trapz_1d(neg_chunk, dt)
 
         if e_pos > 0 and e_neg < 0:
             achilles_energy = min(e_pos, abs(e_neg))
-            scale_pos = achilles_energy / e_pos if e_pos != 0 else 0
-            scale_neg = achilles_energy / abs(e_neg) if e_neg != 0 else 0
-            achilles_doubled[pos_start:pos_end] = pos_chunk * scale_pos
-            achilles_doubled[neg_start:neg_end] = neg_chunk * scale_neg
+            scale_pos = achilles_energy / e_pos if e_pos != 0 else 0.0
+            scale_neg = achilles_energy / abs(e_neg) if e_neg != 0 else 0.0
+
+            for i in range(pos_start, pos_end):
+                achilles_doubled[i] = doubled_power[i] * scale_pos
+            for i in range(neg_start, neg_end):
+                achilles_doubled[i] = doubled_power[i] * scale_neg
 
     achilles_power = achilles_doubled[:N] + achilles_doubled[N:]
     muscle_power = human_power - achilles_power
     return muscle_power, achilles_power
+
+
+# --- Main Analytics Engine ---
 
 
 def clear_aggregations(analyzer):
@@ -82,15 +145,11 @@ def clear_aggregations(analyzer):
 
 
 def compile_window_row(df_win, analyzer, trial_name, window_start_s):
-    """
-    Computes metabolics and mechanical aggregates for the completed 5-minute window
-    currently held in the analyzer's buffers, returning a Wide-Format dictionary.
-    """
     profiles = analyzer.stride_profiles
     if len(profiles["ref_sys"]) == 0:
         return None
 
-    # 1. Calculate Mask Metabolics for this specific window
+    # Calculate Mask Metabolics for this specific window
     vo2_col = next((c for c in df_win.columns if c.lower() == "vo2"), None)
     vco2_col = next((c for c in df_win.columns if c.lower() == "vco2"), None)
 
@@ -114,7 +173,7 @@ def compile_window_row(df_win, analyzer, trial_name, window_start_s):
     )
     net_bio_watts = bio_watts - standing_baseline
 
-    # 2. Extract mechanical metrics
+    # Extract mechanical metrics
     stats = analyzer.stride_analyzer.get_metrics_summary()
     mean_stride_dur = stats.get("stride_duration_mean", 1.0)
     dt_stride = mean_stride_dur / 100.0
@@ -154,107 +213,84 @@ def compile_window_row(df_win, analyzer, trial_name, window_start_s):
     ref_mus_raw, ref_ach_raw = np.array(ref_mus_raw), np.array(ref_ach_raw)
     con_mus_raw, con_ach_raw = np.array(con_mus_raw), np.array(con_ach_raw)
 
-    ref_exo_mean, ref_exo_std = (
-        np.mean(ref_exo_raw, axis=0),
-        np.std(ref_exo_raw, axis=0),
+    ref_exo_mean, ref_exo_std = np.mean(ref_exo_raw, axis=0), np.std(
+        ref_exo_raw, axis=0
     )
-    con_exo_mean, con_exo_std = (
-        np.mean(con_exo_raw, axis=0),
-        np.std(con_exo_raw, axis=0),
+    con_exo_mean, con_exo_std = np.mean(con_exo_raw, axis=0), np.std(
+        con_exo_raw, axis=0
     )
 
-    ref_mus_mean, ref_mus_std = (
-        np.mean(ref_mus_raw, axis=0),
-        np.std(ref_mus_raw, axis=0),
+    ref_mus_mean, ref_mus_std = np.mean(ref_mus_raw, axis=0), np.std(
+        ref_mus_raw, axis=0
     )
-    ref_ach_mean, ref_ach_std = (
-        np.mean(ref_ach_raw, axis=0),
-        np.std(ref_ach_raw, axis=0),
+    ref_ach_mean, ref_ach_std = np.mean(ref_ach_raw, axis=0), np.std(
+        ref_ach_raw, axis=0
     )
 
-    con_mus_mean, con_mus_std = (
-        np.mean(con_mus_raw, axis=0),
-        np.std(con_mus_raw, axis=0),
+    con_mus_mean, con_mus_std = np.mean(con_mus_raw, axis=0), np.std(
+        con_mus_raw, axis=0
     )
-    con_ach_mean, con_ach_std = (
-        np.mean(con_ach_raw, axis=0),
-        np.std(con_ach_raw, axis=0),
+    con_ach_mean, con_ach_std = np.mean(con_ach_raw, axis=0), np.std(
+        con_ach_raw, axis=0
     )
 
-    # 3. Calculate summary metabolic scalars
-    # --- Reference Leg (Stance) Muscle Work Components ---
-    j_pos_ref = np.trapz(np.maximum(ref_mus_mean, 0), dx=dt_stride)
-    j_neg_ref = abs(np.trapz(np.minimum(ref_mus_mean, 0), dx=dt_stride))
-
-    # --- Contralateral Leg (Swing) Muscle Work Components ---
-    j_pos_con = np.trapz(np.maximum(con_mus_mean, 0), dx=dt_stride)
-    j_neg_con = abs(np.trapz(np.minimum(con_mus_mean, 0), dx=dt_stride))
-
-    # Original weighted formula output
+    # Calculate summary metabolic scalars
+    j_pos_ref = np.trapezoid(np.maximum(ref_mus_mean, 0), dx=dt_stride)
+    j_neg_ref = abs(np.trapezoid(np.minimum(ref_mus_mean, 0), dx=dt_stride))
+    j_pos_con = np.trapezoid(np.maximum(con_mus_mean, 0), dx=dt_stride)
+    j_neg_con = abs(np.trapezoid(np.minimum(con_mus_mean, 0), dx=dt_stride))
     est_mech_watts = (
         (4 * j_pos_ref + 1 * j_neg_ref) + (4 * j_pos_con + 1 * j_neg_con)
     ) / mean_stride_dur
 
-    # --- Achilles Tendon Work Components ---
-    j_pos_ref_ach = np.trapz(np.maximum(ref_ach_mean, 0), dx=dt_stride)
-    j_neg_ref_ach = abs(np.trapz(np.minimum(ref_ach_mean, 0), dx=dt_stride))
-    j_pos_con_ach = np.trapz(np.maximum(con_ach_mean, 0), dx=dt_stride)
-    j_neg_con_ach = abs(np.trapz(np.minimum(con_ach_mean, 0), dx=dt_stride))
-
-    # --- Raw Human (No Achilles Model) Work Components ---
     ref_hum_mean = np.mean(np.array(profiles["ref_hum"]), axis=0)
     con_hum_mean = np.mean(np.array(profiles["contra_hum"]), axis=0)
-
-    j_pos_ref_raw = np.trapz(np.maximum(ref_hum_mean, 0), dx=dt_stride)
-    j_neg_ref_raw = abs(np.trapz(np.minimum(ref_hum_mean, 0), dx=dt_stride))
-    j_pos_con_raw = np.trapz(np.maximum(con_hum_mean, 0), dx=dt_stride)
-    j_neg_con_raw = abs(np.trapz(np.minimum(con_hum_mean, 0), dx=dt_stride))
-
+    j_pos_ref_raw = np.trapezoid(np.maximum(ref_hum_mean, 0), dx=dt_stride)
+    j_neg_ref_raw = abs(np.trapezoid(np.minimum(ref_hum_mean, 0), dx=dt_stride))
+    j_pos_con_raw = np.trapezoid(np.maximum(con_hum_mean, 0), dx=dt_stride)
+    j_neg_con_raw = abs(np.trapezoid(np.minimum(con_hum_mean, 0), dx=dt_stride))
     est_mech_watts_no_achilles = (
         (4 * j_pos_ref_raw + 1 * j_neg_ref_raw)
         + (4 * j_pos_con_raw + 1 * j_neg_con_raw)
     ) / mean_stride_dur
 
     exo_power_net = (
-        np.trapz(ref_exo_mean, dx=dt_stride) + np.trapz(con_exo_mean, dx=dt_stride)
+        np.trapezoid(ref_exo_mean, dx=dt_stride) + np.trapezoid(con_exo_mean, dx=dt_stride)
     ) / mean_stride_dur
 
-    # --- Calculate stride-by-stride variability on integrated power outputs ---
+    # Calculate stride-by-stride variability on integrated power outputs
     num_strides = len(profiles["ref_sys"])
     stride_mech_powers = []
     stride_mech_powers_no_achilles = []
     stride_exo_powers = []
 
     for s_idx in range(num_strides):
-        # A. Stance Leg Muscle (With Achilles model)
         r_mus = ref_mus_raw[s_idx]
         c_mus = con_mus_raw[s_idx]
-        j_pos_r = np.trapz(np.maximum(r_mus, 0), dx=dt_stride)
-        j_neg_r = abs(np.trapz(np.minimum(r_mus, 0), dx=dt_stride))
-        j_pos_c = np.trapz(np.maximum(c_mus, 0), dx=dt_stride)
-        j_neg_c = abs(np.trapz(np.minimum(c_mus, 0), dx=dt_stride))
+        j_pos_r = np.trapezoid(np.maximum(r_mus, 0), dx=dt_stride)
+        j_neg_r = abs(np.trapezoid(np.minimum(r_mus, 0), dx=dt_stride))
+        j_pos_c = np.trapezoid(np.maximum(c_mus, 0), dx=dt_stride)
+        j_neg_c = abs(np.trapezoid(np.minimum(c_mus, 0), dx=dt_stride))
         p_mech = (
             (4 * j_pos_r + 1 * j_neg_r) + (4 * j_pos_c + 1 * j_neg_c)
         ) / mean_stride_dur
         stride_mech_powers.append(p_mech)
 
-        # B. Human Power (No Achilles model)
         r_hum = np.array(profiles["ref_hum"][s_idx])
         c_hum = np.array(profiles["contra_hum"][s_idx])
-        j_pos_r_raw = np.trapz(np.maximum(r_hum, 0), dx=dt_stride)
-        j_neg_r_raw = abs(np.trapz(np.minimum(r_hum, 0), dx=dt_stride))
-        j_pos_c_raw = np.trapz(np.maximum(c_hum, 0), dx=dt_stride)
-        j_neg_c_raw = abs(np.trapz(np.minimum(c_hum, 0), dx=dt_stride))
+        j_pos_r_raw = np.trapezoid(np.maximum(r_hum, 0), dx=dt_stride)
+        j_neg_r_raw = abs(np.trapezoid(np.minimum(r_hum, 0), dx=dt_stride))
+        j_pos_c_raw = np.trapezoid(np.maximum(c_hum, 0), dx=dt_stride)
+        j_neg_c_raw = abs(np.trapezoid(np.minimum(c_hum, 0), dx=dt_stride))
         p_mech_no_ach = (
             (4 * j_pos_r_raw + 1 * j_neg_r_raw) + (4 * j_pos_c_raw + 1 * j_neg_c_raw)
         ) / mean_stride_dur
         stride_mech_powers_no_achilles.append(p_mech_no_ach)
 
-        # C. Exo Power
         r_exo = ref_exo_raw[s_idx]
         c_exo = con_exo_raw[s_idx]
         p_exo = (
-            np.trapz(r_exo, dx=dt_stride) + np.trapz(c_exo, dx=dt_stride)
+            np.trapezoid(r_exo, dx=dt_stride) + np.trapezoid(c_exo, dx=dt_stride)
         ) / mean_stride_dur
         stride_exo_powers.append(p_exo)
 
@@ -266,7 +302,7 @@ def compile_window_row(df_win, analyzer, trial_name, window_start_s):
     )
     text_exo_power_std = float(np.std(stride_exo_powers)) if stride_exo_powers else 0.0
 
-    # 4. Build Wide Row
+    # Build Wide Row
     row = {
         "trial_name": trial_name,
         "window_start_s": float(window_start_s),
@@ -283,32 +319,6 @@ def compile_window_row(df_win, analyzer, trial_name, window_start_s):
         "mechanical_power_no_achilles_std": mech_power_no_ach_std,
         "exo_power": exo_power_net,
         "exo_power_std": text_exo_power_std,
-        # Independent Work Components per Stride (Joules)
-        "ref_mus_pos_work_j": j_pos_ref,
-        "ref_mus_neg_work_j": j_neg_ref,
-        "con_mus_pos_work_j": j_pos_con,
-        "con_mus_neg_work_j": j_neg_con,
-        "ref_ach_pos_work_j": j_pos_ref_ach,
-        "ref_ach_neg_work_j": j_neg_ref_ach,
-        "con_ach_pos_work_j": j_pos_con_ach,
-        "con_ach_neg_work_j": j_neg_con_ach,
-        "ref_hum_pos_work_j": j_pos_ref_raw,
-        "ref_hum_neg_work_j": j_neg_ref_raw,
-        "con_hum_pos_work_j": j_pos_con_raw,
-        "con_hum_neg_work_j": j_neg_con_raw,
-        # Independent Average Power Contributions (Watts)
-        "ref_mus_pos_power_w": j_pos_ref / mean_stride_dur,
-        "ref_mus_neg_power_w": j_neg_ref / mean_stride_dur,
-        "con_mus_pos_power_w": j_pos_con / mean_stride_dur,
-        "con_mus_neg_power_w": j_neg_con / mean_stride_dur,
-        "ref_ach_pos_power_w": j_pos_ref_ach / mean_stride_dur,
-        "ref_ach_neg_power_w": j_neg_ref_ach / mean_stride_dur,
-        "con_ach_pos_power_w": j_pos_con_ach / mean_stride_dur,
-        "con_ach_neg_power_w": j_neg_con_ach / mean_stride_dur,
-        "ref_hum_pos_power_w": j_pos_ref_raw / mean_stride_dur,
-        "ref_hum_neg_power_w": j_neg_ref_raw / mean_stride_dur,
-        "con_hum_pos_power_w": j_pos_con_raw / mean_stride_dur,
-        "con_hum_neg_power_w": j_neg_con_raw / mean_stride_dur,
     }
 
     # Inject all 1D bucket columns
@@ -327,7 +337,6 @@ def compile_window_row(df_win, analyzer, trial_name, window_start_s):
         row[f"con_ach_std_{i:02d}"] = con_ach_std[i]
         row[f"con_mus_std_{i:02d}"] = con_mus_std[i]
 
-        # Center of Mass (COM) Excursion (Zero-Centered)
         row[f"com_x_w_{i:02d}"] = com_x_centered[i]
         row[f"com_y_w_{i:02d}"] = com_y_centered[i]
         row[f"com_z_w_{i:02d}"] = com_z_centered[i]
@@ -342,10 +351,6 @@ def compile_window_row(df_win, analyzer, trial_name, window_start_s):
 def process_trial(
     df, left_body, right_body, trial_name, burn_in_s, window_s, min_window_s
 ):
-    """
-    Runs KF and gait tracking continuously over the whole trial,
-    extracting aggregated 5-minute chunks starting after burn_in_s.
-    """
     times = df["time"].values
     dts = np.diff(times)
     default_dt = np.median(dts) if len(dts) > 0 else 0.01
@@ -355,7 +360,6 @@ def process_trial(
     current_window_start = burn_in_thresh
     current_window_end = current_window_start + window_s
 
-    # Mass guess initialization
     f_total_y = df[f"{left_body}_force_y"].values + df[f"{right_body}_force_y"].values
     active_fy = f_total_y[f_total_y > 50.0]
     calc_mass = np.mean(active_fy) / 9.81 if len(active_fy) > 0 else 70.0
@@ -390,7 +394,6 @@ def process_trial(
         forces = {"left": left_forces[i], "right": right_forces[i]}
         cops = {"left": left_cops[i], "right": right_cops[i]}
 
-        # 1. Update filter continuously (Never reset)
         analyzer.update(
             t,
             forces,
@@ -400,12 +403,10 @@ def process_trial(
             exo_power_right=(tauR_vals[i] * velR_vals[i]),
         )
 
-        # 2. Burn-In Phase: continuously clear stride buffers so they don't pollute the first window
         if t < burn_in_thresh:
             clear_aggregations(analyzer)
             continue
 
-        # 3. Window Completion: Process the last 5 minutes and reset buffers for the next
         if t >= current_window_end:
             df_win = df[
                 (df["time"] >= current_window_start) & (df["time"] < current_window_end)
@@ -413,30 +414,85 @@ def process_trial(
             row = compile_window_row(df_win, analyzer, trial_name, current_window_start)
             if row:
                 rows.append(row)
-                print(
-                    f"  -> Window {current_window_start:.0f}s-{current_window_end:.0f}s | Mech: {row['mechanical_power']:.1f}W | Bio: {row['net_bio_cost_w']:.1f}W"
-                )
 
             clear_aggregations(analyzer)
             current_window_start = current_window_end
             current_window_end = current_window_start + window_s
 
-    # 4. Handle final remaining tail of the trial
     if (times[-1] - current_window_start) >= min_window_s:
         df_win = df[(df["time"] >= current_window_start) & (df["time"] <= times[-1])]
         row = compile_window_row(df_win, analyzer, trial_name, current_window_start)
         if row:
             rows.append(row)
-            print(
-                f"  -> Tail Window {current_window_start:.0f}s-{times[-1]:.0f}s | Mech: {row['mechanical_power']:.1f}W | Bio: {row['net_bio_cost_w']:.1f}W"
-            )
 
     return rows
 
 
+def process_file_worker(file_path, burn_in, window, min_window):
+    """Worker function for running trial analysis isolated in a separate process."""
+    filename = os.path.basename(file_path)
+    trial_name = os.path.splitext(filename)[0]
+
+    try:
+        # Fast metadata-only pass
+        df_time = pd.read_parquet(file_path, columns=["time"])
+        if not df_time.empty:
+            times = df_time["time"].values
+            total_duration = times[-1] - times[0]
+            min_required = burn_in + min_window
+            if total_duration < min_required:
+                return {
+                    "status": "skipped",
+                    "trial": trial_name,
+                    "reason": f"Duration ({total_duration:.1f}s) too short.",
+                }
+    except Exception as e:
+        return {
+            "status": "error",
+            "trial": trial_name,
+            "reason": f"Metadata read error: {e}",
+        }
+
+    try:
+        df = pd.read_parquet(file_path)
+    except Exception as e:
+        return {"status": "error", "trial": trial_name, "reason": f"Read error: {e}"}
+
+    force_cols = [col for col in df.columns if col.endswith("_force_y")]
+    contact_bodies = [col.replace("_force_y", "") for col in force_cols]
+    left_body = next(
+        (cb for cb in contact_bodies if cb.endswith("_l") or "left" in cb.lower()),
+        contact_bodies[0],
+    )
+    right_body = next(
+        (cb for cb in contact_bodies if cb.endswith("_r") or "right" in cb.lower()),
+        contact_bodies[1],
+    )
+
+    try:
+        trial_rows = process_trial(
+            df, left_body, right_body, trial_name, burn_in, window, min_window
+        )
+    except Exception as e:
+        return {
+            "status": "error",
+            "trial": trial_name,
+            "reason": f"Calculation error: {e}",
+        }
+
+    if trial_rows:
+        return {"status": "success", "trial": trial_name, "rows": trial_rows}
+    else:
+        return {
+            "status": "skipped",
+            "trial": trial_name,
+            "reason": "No valid windows generated.",
+        }
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Precompute continuous mechanics/metabolics into 5-minute chunks."
+        description="Precompute continuous mechanics/metabolics in parallel chunks."
     )
     parser.add_argument("--dir", type=str, default=POGGENSEE_DIR)
     parser.add_argument(
@@ -459,17 +515,21 @@ def main():
         type=str,
         default=os.path.join(POGGENSEE_DIR, "precomputed_poggensee.parquet"),
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=len(os.sched_getaffinity(0)),
+        help="Number of CPU workers to parallelize execution",
+    )
     args = parser.parse_args()
 
     parquet_path = os.path.abspath(args.out)
-    processed_trials = set()
-
-    # Create directory if missing
     os.makedirs(os.path.dirname(parquet_path), exist_ok=True)
 
-    # 1. Load skipped/invalid trials log to avoid re-calculating them
+    processed_trials = set()
     skipped_log_path = os.path.join(os.path.dirname(parquet_path), "skipped_trials.txt")
     skipped_trials = set()
+
     if os.path.exists(skipped_log_path):
         try:
             with open(skipped_log_path, "r", encoding="utf-8") as f:
@@ -478,6 +538,7 @@ def main():
         except Exception as e:
             print(f"Warning: Could not read skipped log: {e}")
 
+    existing_df = pd.DataFrame()
     if os.path.exists(parquet_path):
         try:
             existing_df = pd.read_parquet(parquet_path)
@@ -491,107 +552,60 @@ def main():
             print(f"Failed to read existing Parquet {parquet_path}: {e}")
             sys.exit(1)
     else:
-        existing_df = pd.DataFrame()
         print(f"Creating new precomputed Parquet at: {parquet_path}")
 
     files = glob.glob(os.path.join(os.path.abspath(args.dir), "*.parquet"))
     files = [f for f in files if "precomputed_poggensee" not in f]
 
-    if not files:
-        print(f"No valid .parquet trials found in {args.dir}")
+    files_to_process = []
+    for f in sorted(files):
+        t_name = os.path.splitext(os.path.basename(f))[0]
+        if t_name not in processed_trials and t_name not in skipped_trials:
+            files_to_process.append(f)
+
+    if not files_to_process:
+        print("No new valid .parquet trials found to process.")
         return
 
-    for file_path in sorted(files):
-        filename = os.path.basename(file_path)
-        trial_name = os.path.splitext(filename)[0]
+    # --- ADD THIS WARM-UP BLOCK ---
+    if USE_NUMBA:
+        print("Warming up Numba JIT compiler to prevent multi-core cache collisions...")
+        # Pass a dummy array to force LLVM to compile the functions in the main process
+        dummy_power = np.random.randn(100).astype(np.float64)
+        _ = extract_biological_components(dummy_power, 0.01)
+    # ------------------------------
 
-        # Check both completion and skipped sets
-        if trial_name in processed_trials:
-            print(f"Skipping {filename} (Already completed)")
-            continue
-        if trial_name in skipped_trials:
-            print(f"Skipping {filename} (Already marked skipped/invalid)")
-            continue
+    print(f"\nDispatching {len(files_to_process)} trial(s) to {args.workers} workers...")
 
-        print(f"\nProcessing {filename}...")
+    # Parallel Execution Pool
+    with ProcessPoolExecutor(max_workers=args.workers) as executor:
+        futures = {
+            executor.submit(
+                process_file_worker, fp, args.burn_in, args.window, args.min_window
+            ): fp
+            for fp in files_to_process
+        }
 
-        # Fast metadata-only pass: Read only the time column to verify total duration
-        try:
-            df_time = pd.read_parquet(file_path, columns=["time"])
-            if not df_time.empty:
-                times = df_time["time"].values
-                total_duration = times[-1] - times[0]
-                min_required = args.burn_in + args.min_window
-                if total_duration < min_required:
-                    print(
-                        f"  -> Skipped: Trial duration ({total_duration:.1f}s) is too short to generate a window (minimum required: {min_required:.1f}s)."
-                    )
-                    # Automatically log this trial to prevent rescanning in subsequent runs
-                    try:
-                        with open(skipped_log_path, "a", encoding="utf-8") as f:
-                            f.write(f"{trial_name}\n")
-                        skipped_trials.add(trial_name)
-                    except Exception as write_err:
-                        print(
-                            f"Warning: Could not write skipped trial to log: {write_err}"
-                        )
-                    continue
-        except Exception as e:
-            print(f"  Error reading temporal metadata for {filename}: {e}")
-            continue
+        for future in as_completed(futures):
+            res = future.result()
+            t_name = res["trial"]
 
-        try:
-            df = pd.read_parquet(file_path)
-        except Exception as e:
-            print(f"  Error reading {filename}: {e}")
-            continue
+            if res["status"] == "success":
+                new_rows_df = pd.DataFrame(res["rows"])
+                existing_df = pd.concat([existing_df, new_rows_df], ignore_index=True)
+                existing_df.to_parquet(parquet_path, index=False)
+                print(f"  -> Saved {len(res['rows'])} windows for {t_name}")
+            else:
+                reason = res["reason"]
+                prefix = "Error" if res["status"] == "error" else "Skipped"
+                print(f"  -> {prefix} {t_name}: {reason}")
 
-        force_cols = [col for col in df.columns if col.endswith("_force_y")]
-        contact_bodies = [col.replace("_force_y", "") for col in force_cols]
-        left_body = next(
-            (cb for cb in contact_bodies if cb.endswith("_l") or "left" in cb.lower()),
-            contact_bodies[0],
-        )
-        right_body = next(
-            (cb for cb in contact_bodies if cb.endswith("_r") or "right" in cb.lower()),
-            contact_bodies[1],
-        )
-
-        try:
-            trial_rows = process_trial(
-                df,
-                left_body,
-                right_body,
-                trial_name,
-                args.burn_in,
-                args.window,
-                args.min_window,
-            )
-        except Exception as e:
-            print(f"  -> Error calculating trial metrics: {e}")
-            # Log errored files to skipped list to prevent crash-loops on subsequent executions
-            try:
-                with open(skipped_log_path, "a", encoding="utf-8") as f:
-                    f.write(f"{trial_name}\n")
-                skipped_trials.add(trial_name)
-            except Exception as write_err:
-                print(f"Warning: Could not write errored trial to log: {write_err}")
-            continue
-
-        if trial_rows:
-            new_rows_df = pd.DataFrame(trial_rows)
-            existing_df = pd.concat([existing_df, new_rows_df], ignore_index=True)
-            existing_df.to_parquet(parquet_path, index=False)
-            print(f"  -> Saved {len(trial_rows)} windows for {filename}")
-        else:
-            print(f"  -> Skipped: No valid windows generated for {filename}.")
-            # Write to the skipped trials log
-            try:
-                with open(skipped_log_path, "a", encoding="utf-8") as f:
-                    f.write(f"{trial_name}\n")
-                skipped_trials.add(trial_name)
-            except Exception as e:
-                print(f"Warning: Could not write skipped trial to log: {e}")
+                try:
+                    with open(skipped_log_path, "a", encoding="utf-8") as f:
+                        f.write(f"{t_name}\n")
+                    skipped_trials.add(t_name)
+                except Exception as write_err:
+                    pass
 
     print("\nPrecompute process completed.")
 
