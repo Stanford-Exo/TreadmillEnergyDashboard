@@ -182,20 +182,34 @@ def compile_window_row(df_win, analyzer, trial_name, window_start_s):
     )
 
     # 3. Calculate summary metabolic scalars
+    # --- Reference Leg (Stance) Muscle Work Components ---
     j_pos_ref = np.trapz(np.maximum(ref_mus_mean, 0), dx=dt_stride)
     j_neg_ref = abs(np.trapz(np.minimum(ref_mus_mean, 0), dx=dt_stride))
+
+    # --- Contralateral Leg (Swing) Muscle Work Components ---
     j_pos_con = np.trapz(np.maximum(con_mus_mean, 0), dx=dt_stride)
     j_neg_con = abs(np.trapz(np.minimum(con_mus_mean, 0), dx=dt_stride))
+
+    # Original weighted formula output
     est_mech_watts = (
         (4 * j_pos_ref + 1 * j_neg_ref) + (4 * j_pos_con + 1 * j_neg_con)
     ) / mean_stride_dur
 
+    # --- Achilles Tendon Work Components ---
+    j_pos_ref_ach = np.trapz(np.maximum(ref_ach_mean, 0), dx=dt_stride)
+    j_neg_ref_ach = abs(np.trapz(np.minimum(ref_ach_mean, 0), dx=dt_stride))
+    j_pos_con_ach = np.trapz(np.maximum(con_ach_mean, 0), dx=dt_stride)
+    j_neg_con_ach = abs(np.trapz(np.minimum(con_ach_mean, 0), dx=dt_stride))
+
+    # --- Raw Human (No Achilles Model) Work Components ---
     ref_hum_mean = np.mean(np.array(profiles["ref_hum"]), axis=0)
     con_hum_mean = np.mean(np.array(profiles["contra_hum"]), axis=0)
+
     j_pos_ref_raw = np.trapz(np.maximum(ref_hum_mean, 0), dx=dt_stride)
     j_neg_ref_raw = abs(np.trapz(np.minimum(ref_hum_mean, 0), dx=dt_stride))
     j_pos_con_raw = np.trapz(np.maximum(con_hum_mean, 0), dx=dt_stride)
     j_neg_con_raw = abs(np.trapz(np.minimum(con_hum_mean, 0), dx=dt_stride))
+
     est_mech_watts_no_achilles = (
         (4 * j_pos_ref_raw + 1 * j_neg_ref_raw)
         + (4 * j_pos_con_raw + 1 * j_neg_con_raw)
@@ -269,6 +283,32 @@ def compile_window_row(df_win, analyzer, trial_name, window_start_s):
         "mechanical_power_no_achilles_std": mech_power_no_ach_std,
         "exo_power": exo_power_net,
         "exo_power_std": text_exo_power_std,
+        # Independent Work Components per Stride (Joules)
+        "ref_mus_pos_work_j": j_pos_ref,
+        "ref_mus_neg_work_j": j_neg_ref,
+        "con_mus_pos_work_j": j_pos_con,
+        "con_mus_neg_work_j": j_neg_con,
+        "ref_ach_pos_work_j": j_pos_ref_ach,
+        "ref_ach_neg_work_j": j_neg_ref_ach,
+        "con_ach_pos_work_j": j_pos_con_ach,
+        "con_ach_neg_work_j": j_neg_con_ach,
+        "ref_hum_pos_work_j": j_pos_ref_raw,
+        "ref_hum_neg_work_j": j_neg_ref_raw,
+        "con_hum_pos_work_j": j_pos_con_raw,
+        "con_hum_neg_work_j": j_neg_con_raw,
+        # Independent Average Power Contributions (Watts)
+        "ref_mus_pos_power_w": j_pos_ref / mean_stride_dur,
+        "ref_mus_neg_power_w": j_neg_ref / mean_stride_dur,
+        "con_mus_pos_power_w": j_pos_con / mean_stride_dur,
+        "con_mus_neg_power_w": j_neg_con / mean_stride_dur,
+        "ref_ach_pos_power_w": j_pos_ref_ach / mean_stride_dur,
+        "ref_ach_neg_power_w": j_neg_ref_ach / mean_stride_dur,
+        "con_ach_pos_power_w": j_pos_con_ach / mean_stride_dur,
+        "con_ach_neg_power_w": j_neg_con_ach / mean_stride_dur,
+        "ref_hum_pos_power_w": j_pos_ref_raw / mean_stride_dur,
+        "ref_hum_neg_power_w": j_neg_ref_raw / mean_stride_dur,
+        "con_hum_pos_power_w": j_pos_con_raw / mean_stride_dur,
+        "con_hum_neg_power_w": j_neg_con_raw / mean_stride_dur,
     }
 
     # Inject all 1D bucket columns

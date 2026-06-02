@@ -1,0 +1,450 @@
+# File: src/analysis/fit_metabolic_coefficients.py
+
+import argparse
+import os
+import sys
+
+import numpy as np
+import pandas as pd
+from scipy.stats import t
+
+# Setup relative paths
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.abspath(os.path.join(SCRIPT_DIR, "../")))
+
+try:
+    import matplotlib.cm as cm
+    import matplotlib.pyplot as plt
+except ImportError:
+    plt = None
+
+DEFAULT_PARQUET_PATH = os.path.abspath(
+    os.path.join(SCRIPT_DIR, "../../exported_pogensee/precomputed_poggensee.parquet")
+)
+
+# --- Tufte/Notion Aesthetics ---
+if plt is not None:
+    plt.rcParams["font.family"] = "sans-serif"
+    plt.rcParams["font.sans-serif"] = ["Inter", "-apple-system", "Arial", "sans-serif"]
+
+NOTION_BG = "#FFFFFF"
+NOTION_TEXT = "#37352F"
+NOTION_SUBTEXT = "#787774"
+NOTION_GRID = "#EDEDED"
+
+
+def compile_regression_deltas(df):
+    """
+    Groups data by trial, filters outliers, and calculates deltas of each component
+    relative to the window containing the maximum metabolic cost.
+    """
+    print(f"\n[DEBUG] Starting compilation. DataFrame shape: {df.shape}")
+    if df.empty:
+        return pd.DataFrame()
+
+    unique_trials = df["trial_name"].unique()
+    delta_rows = []
+
+    stats = {
+        "total_trials_seen": len(unique_trials),
+        "skipped_too_short": 0,
+        "skipped_empty_after_metabolic_bounds": 0,
+        "skipped_too_few_after_transient_filter": 0,
+        "valid_trials_compiled": 0,
+        "total_windows_loaded": len(df),
+        "windows_removed_by_cooldown": 0,
+        "windows_removed_by_metabolic_bounds": 0,
+        "windows_removed_by_transient_filter": 0,
+    }
+
+    for trial_name, group in df.groupby("trial_name"):
+        n_initial = len(group)
+        group = group.sort_values(by="window_start_s").reset_index(drop=True)
+
+        # 1. Filter: Exclude cooldown tail transients
+        if len(group) > 2:
+            group = group.iloc[:-2].reset_index(drop=True)
+            stats["windows_removed_by_cooldown"] += 2
+        else:
+            stats["skipped_too_short"] += 1
+            continue
+
+        # 2. Filter: Raw metabolic bounds [50.0, 600.0]
+        n_pre_bounds = len(group)
+        metabolic_values = group["net_bio_cost_w"].values
+        in_bounds_mask = (metabolic_values >= 50.0) & (metabolic_values <= 600.0)
+
+        group_filtered = group[in_bounds_mask].reset_index(drop=True)
+        n_removed_bounds = n_pre_bounds - len(group_filtered)
+        stats["windows_removed_by_metabolic_bounds"] += n_removed_bounds
+
+        if group_filtered.empty:
+            stats["skipped_empty_after_metabolic_bounds"] += 1
+            continue
+
+        group = group_filtered
+
+        # 3. Filter: Extreme metabolic transients (deviating from trial median by >= 100W)
+        n_pre_transients = len(group)
+        trial_median_bio = group["net_bio_cost_w"].median()
+        within_transient_mask = (
+            np.abs(group["net_bio_cost_w"] - trial_median_bio) < 100.0
+        )
+
+        group_filtered = group[within_transient_mask].reset_index(drop=True)
+        n_removed_transients = n_pre_transients - len(group_filtered)
+        stats["windows_removed_by_transient_filter"] += n_removed_transients
+
+        if len(group_filtered) < 2:
+            stats["skipped_too_few_after_transient_filter"] += 1
+            continue
+
+        group = group_filtered
+        stats["valid_trials_compiled"] += 1
+
+        # Identify reference window (maximum metabolic cost)
+        ref_idx = group["net_bio_cost_w"].idxmax()
+        ref_row = group.loc[ref_idx]
+
+        # Calculate bilaterally combined baseline terms
+        ref_pos_mus = ref_row["ref_mus_pos_power_w"] + ref_row["con_mus_pos_power_w"]
+        ref_neg_mus = ref_row["ref_mus_neg_power_w"] + ref_row["con_mus_neg_power_w"]
+        ref_pos_ach = ref_row["ref_ach_pos_power_w"] + ref_row["con_ach_pos_power_w"]
+        ref_neg_ach = ref_row["ref_ach_neg_power_w"] + ref_row["con_ach_neg_power_w"]
+        ref_bio = ref_row["net_bio_cost_w"]
+
+        for idx, row in group.iterrows():
+            pos_mus = row["ref_mus_pos_power_w"] + row["con_mus_pos_power_w"]
+            neg_mus = row["ref_mus_neg_power_w"] + row["con_mus_neg_power_w"]
+            pos_ach = row["ref_ach_pos_power_w"] + row["con_ach_pos_power_w"]
+            neg_ach = row["ref_ach_neg_power_w"] + row["con_ach_neg_power_w"]
+
+            # Compute deltas relative to baseline peak window
+            delta_rows.append(
+                {
+                    "trial_name": trial_name,
+                    "window_start_s": row["window_start_s"],
+                    "delta_bio_w": row["net_bio_cost_w"] - ref_bio,
+                    "delta_pos_mus_w": pos_mus - ref_pos_mus,
+                    "delta_neg_mus_w": neg_mus - ref_neg_mus,
+                    "delta_pos_ach_w": pos_ach - ref_pos_ach,
+                    "delta_neg_ach_w": neg_ach - ref_neg_ach,
+                    # Keep raw values to compute raw predictions during plotting
+                    "raw_pos_mus_w": pos_mus,
+                    "raw_neg_mus_w": neg_mus,
+                    "raw_pos_ach_w": pos_ach,
+                    "raw_neg_ach_w": neg_ach,
+                }
+            )
+
+    print("\n[DEBUG] Filter Statistics Summary:")
+    for key, val in stats.items():
+        print(f"  - {key:38}: {val}")
+    print(f"  - Total delta rows compiled for OLS: {len(delta_rows)}\n")
+
+    return pd.DataFrame(delta_rows)
+
+
+def fit_coefficients(df_deltas):
+    """
+    Fits standard OLS forced through the origin: y = X * beta
+    """
+    features = [
+        "delta_pos_mus_w",
+        "delta_neg_mus_w",
+        "delta_pos_ach_w",
+        "delta_neg_ach_w",
+    ]
+    X = df_deltas[features].values
+    y = df_deltas["delta_bio_w"].values
+
+    # OLS through origin: beta = (X^T * X)^-1 * X^T * y
+    XTX = X.T @ X
+    XTy = X.T @ y
+
+    beta = np.linalg.solve(XTX, XTy)
+
+    residuals = y - X @ beta
+    rss = np.sum(residuals**2)
+    tss = np.sum(y**2)
+
+    n, p = X.shape
+    s2 = rss / (n - p) if n > p else 0.0
+
+    cov_beta = s2 * np.linalg.inv(XTX) if n > p else np.zeros((p, p))
+    se_beta = np.sqrt(np.diag(cov_beta))
+
+    t_stats = beta / se_beta
+    p_values = 2 * (1 - t.cdf(np.abs(t_stats), df=n - p))
+
+    r2 = 1.0 - (rss / tss) if tss > 0 else 0.0
+
+    results = {
+        "coefficients": beta,
+        "standard_errors": se_beta,
+        "t_statistics": t_stats,
+        "p_values": p_values,
+        "r2": r2,
+        "residuals": residuals,
+        "n": n,
+        "p": p,
+        "features": features,
+    }
+    return results
+
+
+def plot_fitting_results(df_deltas, results):
+    """
+    Plots Actual vs. Predicted Delta Metabolics alongside estimated coefficients.
+    Forces both predicted and actual maximums to be 0 for each trial, scattering down/left.
+    """
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6.5), facecolor=NOTION_BG)
+    ax1.set_facecolor(NOTION_BG)
+    ax2.set_facecolor(NOTION_BG)
+
+    title = "Empirical Regression: Fitting Biological and Elastic Cost Coefficients"
+    subtitle = f"Multi-variable OLS forced through the origin | N = {results['n']} windows | Combined R^2 = {results['r2']:.3f}"
+
+    fig.text(0.04, 0.94, title, fontsize=15, fontweight="bold", color=NOTION_TEXT)
+    fig.text(0.04, 0.90, subtitle, fontsize=10.5, color=NOTION_SUBTEXT)
+    plt.subplots_adjust(top=0.82, bottom=0.15, left=0.08, right=0.92, wspace=0.28)
+
+    for ax in [ax1, ax2]:
+        for spine in ["top", "right"]:
+            ax.spines[spine].set_visible(False)
+        for spine in ["bottom", "left"]:
+            ax.spines[spine].set_color(NOTION_TEXT)
+        ax.tick_params(axis="both", colors=NOTION_TEXT, length=4, labelsize=9)
+        ax.grid(color=NOTION_GRID, linestyle="-", linewidth=1.0)
+        ax.set_axisbelow(True)
+
+    # ---------------------------------------------------------
+    # Subplot 1: Actual vs. Predicted Delta Metabolics
+    # ---------------------------------------------------------
+    unique_trials = df_deltas["trial_name"].unique()
+    colormap = cm.get_cmap("tab10", max(len(unique_trials), 10))
+
+    all_actual_deltas = []
+    all_pred_deltas = []
+
+    for i, trial_name in enumerate(unique_trials):
+        sub_df = df_deltas[df_deltas["trial_name"] == trial_name].copy()
+
+        # 1. Actual delta (metabolic change relative to its maximum observed rate)
+        actual_delta = sub_df["delta_bio_w"].values
+
+        # 2. Raw predictions for each window using the fitted coefficients
+        raw_pred = (
+            results["coefficients"][0] * sub_df["raw_pos_mus_w"].values
+            + results["coefficients"][1] * sub_df["raw_neg_mus_w"].values
+            + results["coefficients"][2] * sub_df["raw_pos_ach_w"].values
+            + results["coefficients"][3] * sub_df["raw_neg_ach_w"].values
+        )
+
+        # 3. Predicted delta (predicted change relative to the maximum predicted rate)
+        pred_delta = raw_pred - np.max(raw_pred)
+
+        all_actual_deltas.extend(actual_delta)
+        all_pred_deltas.extend(pred_delta)
+
+        ax1.scatter(
+            pred_delta,
+            actual_delta,
+            color=colormap(i),
+            s=50,
+            alpha=0.75,
+            edgecolors="white",
+            linewidths=0.4,
+            label=trial_name,
+        )
+
+    # Reference line of perfect correlation: both drop identically
+    min_val = min(np.min(all_actual_deltas), np.min(all_pred_deltas))
+    ax1.plot(
+        [min_val - 5.0, 5.0],
+        [min_val - 5.0, 5.0],
+        color=NOTION_TEXT,
+        linestyle="--",
+        linewidth=1.2,
+        label="Perfect Fit (y=x)",
+    )
+
+    # Anchor coordinates at origin (0, 0) top-right
+    ax1.set_xlim(min_val - 5.0, 5.0)
+    ax1.set_ylim(min_val - 5.0, 5.0)
+    ax1.set_xlabel(
+        "Change in Predicted Metabolic Cost ($\Delta$ Predicted) (W)",
+        fontsize=10,
+        fontweight="bold",
+        color=NOTION_TEXT,
+    )
+    ax1.set_ylabel(
+        "Change in Measured Metabolic Cost ($\Delta$ Observed) (W)",
+        fontsize=10,
+        fontweight="bold",
+        color=NOTION_TEXT,
+    )
+    ax1.set_title(
+        "Aligned Model Performance (Deviations from Peaks)",
+        fontsize=11,
+        fontweight="bold",
+        color=NOTION_TEXT,
+        pad=10,
+    )
+    ax1.legend(
+        frameon=True,
+        facecolor=NOTION_BG,
+        edgecolor=NOTION_GRID,
+        fontsize=7.5,
+        loc="lower left",
+        ncol=2,
+    )
+
+    # ---------------------------------------------------------
+    # Subplot 2: Bar Chart of Estimated Coefficients
+    # ---------------------------------------------------------
+    labels = [
+        "Positive Muscle\n(c_pos_mus)",
+        "Negative Muscle\n(c_neg_mus)",
+        "Positive Achilles\n(c_pos_ach)",
+        "Negative Achilles\n(c_neg_ach)",
+    ]
+
+    coeffs = results["coefficients"]
+    errors = results["standard_errors"]
+    p_vals = results["p_values"]
+
+    bar_colors = ["#FCA5A5", "#FCA5A5", "#D1D5DB", "#D1D5DB"]
+    edge_colors = ["#DC2626", "#DC2626", "#4B5563", "#4B5563"]
+
+    bars = ax2.bar(
+        labels,
+        coeffs,
+        color=bar_colors,
+        edgecolor=edge_colors,
+        linewidth=1.2,
+        yerr=errors,
+        capsize=5,
+        error_kw=dict(ecolor=NOTION_TEXT, elinewidth=1.5, markeredgewidth=1.5),
+    )
+
+    # Superimpose standard 4:1 guideline references
+    literature_defaults = [4.0, 1.0, 0.0, 0.0]
+    for idx, baseline in enumerate(literature_defaults):
+        ax2.hlines(
+            baseline,
+            xmin=idx - 0.3,
+            xmax=idx + 0.3,
+            colors="#DC2626",
+            linestyles=":",
+            linewidths=1.5,
+            zorder=5,
+        )
+
+    ax2.axhline(0, color=NOTION_TEXT, linewidth=0.8)
+    ax2.set_ylabel(
+        "Fitted Coefficient Value", fontsize=10, fontweight="bold", color=NOTION_TEXT
+    )
+    ax2.set_title(
+        "Estimated Cost Parameters",
+        fontsize=11,
+        fontweight="bold",
+        color=NOTION_TEXT,
+        pad=10,
+    )
+
+    for idx, bar in enumerate(bars):
+        height = bar.get_height()
+        val = coeffs[idx]
+        err = errors[idx]
+        p_val = p_vals[idx]
+
+        text_str = (
+            f"{val:+.2f}\n±{err:.2f}\np={p_val:.3f}"
+            if p_val >= 0.001
+            else f"{val:+.2f}\n±{err:.2f}\np<0.001"
+        )
+        va_dir = "bottom" if height >= 0 else "top"
+        offset = 0.15 if height >= 0 else -0.55
+
+        ax2.text(
+            bar.get_x() + bar.get_width() / 2.0,
+            height + offset,
+            text_str,
+            ha="center",
+            va=va_dir,
+            color=NOTION_TEXT,
+            fontsize=8,
+            fontweight="bold",
+        )
+
+    ax2.plot(
+        [], [], color="#DC2626", linestyle=":", label="Theoretical Lit Value (4:1:0:0)"
+    )
+    ax2.legend(frameon=False, loc="upper right", fontsize=8, labelcolor=NOTION_TEXT)
+
+    plt.show()
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Fits metabolic coefficients directly to the wide-format dataset."
+    )
+    parser.add_argument(
+        "--file",
+        type=str,
+        default=DEFAULT_PARQUET_PATH,
+        help="Path to precomputed parquet file.",
+    )
+    args = parser.parse_args()
+
+    if plt is None:
+        print("Error: matplotlib is required. Please run: pip install matplotlib")
+        sys.exit(1)
+
+    parquet_path = os.path.abspath(args.file)
+    if not os.path.exists(parquet_path):
+        print(f"Error: Precomputed parquet database not found at: {parquet_path}")
+        print("Please process files using: make precompute-poggensee first.")
+        sys.exit(1)
+
+    df = pd.read_parquet(parquet_path)
+    if df.empty:
+        print("Empty dataset. Check database contents.")
+        sys.exit(1)
+
+    df_deltas = compile_regression_deltas(df)
+
+    if df_deltas.empty:
+        print("No valid trial windows remain after clearing transients and outliers.")
+        sys.exit(1)
+
+    results = fit_coefficients(df_deltas)
+
+    print("\n==================================================")
+    print("      ESTIMATED METABOLIC REGRESSION COEFFS       ")
+    print("==================================================")
+    print(
+        f"Fit on {results['n']} windows across {len(df_deltas['trial_name'].unique())} unique trials."
+    )
+    print(f"Forced through origin | Combined R^2: {results['r2']:.4f}\n")
+
+    for idx, col in enumerate(results["features"]):
+        name = col.replace("delta_", "").replace("_w", "")
+        beta_val = results["coefficients"][idx]
+        se_val = results["standard_errors"][idx]
+        t_val = results["t_statistics"][idx]
+        p_val = results["p_values"][idx]
+
+        p_str = f"{p_val:.2e}" if p_val < 0.001 else f"{p_val:.4f}"
+
+        print(f"  Coefficient {name:15}: {beta_val:+.4f} ± {se_val:.4f}")
+        print(f"    - t-statistic: {t_val:+.3f}")
+        print(f"    - p-value    : {p_str}")
+        print("-" * 50)
+
+    plot_fitting_results(df_deltas, results)
+
+
+if __name__ == "__main__":
+    main()

@@ -50,7 +50,7 @@ class EnergyAnalyzer:
 
         # --- Belt Crossing Rejection Thresholds ---
         self.max_cop_velocity = (
-            4.0  # m/s (catches sudden contact shifts on the same plate)
+            6.0  # m/s (catches sudden contact shifts on the same plate)
         )
         self.cop_stability_force_threshold = (
             150.0  # N (CoP calculations are highly noisy below this threshold)
