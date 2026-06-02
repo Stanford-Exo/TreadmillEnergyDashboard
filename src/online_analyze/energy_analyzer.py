@@ -53,7 +53,7 @@ class EnergyAnalyzer:
             6.0  # m/s (catches sudden contact shifts on the same plate)
         )
         self.cop_stability_force_threshold = (
-            150.0  # N (CoP calculations are highly noisy below this threshold)
+            400.0  # N (CoP calculations are highly noisy below this threshold)
         )
         self.max_normalized_force = (
             1.35  # times body weight (catches dual weight on a single plate)
@@ -182,17 +182,17 @@ class EnergyAnalyzer:
 
                     # Check 2: Sudden CoP Velocity jump (gated by stable force thresholds)
                     cop_vel = 0.0
-                    if self.last_cop[foot] is not None and dt > 0:
-                        cop_vel = np.linalg.norm(cops[foot] - self.last_cop[foot]) / dt
-                        if (
-                            fy > self.cop_stability_force_threshold
-                            and self.last_fy[foot] > self.cop_stability_force_threshold
-                        ):
-                            if cop_vel > self.max_cop_velocity and was_active[foot]:
-                                buf["is_clean"] = False
-                                buf["reject_reason"] = (
-                                    f"CoP velocity jump ({cop_vel:.2f} m/s) under stable load ({fy:.1f} N)"
-                                )
+                    # if self.last_cop[foot] is not None and dt > 0:
+                    #     cop_vel = np.linalg.norm(cops[foot] - self.last_cop[foot]) / dt
+                    #     if (
+                    #         fy > self.cop_stability_force_threshold
+                    #         and self.last_fy[foot] > self.cop_stability_force_threshold
+                    #     ):
+                    #         if cop_vel > self.max_cop_velocity and was_active[foot]:
+                    #             buf["is_clean"] = False
+                    #             buf["reject_reason"] = (
+                    #                 f"CoP velocity jump ({cop_vel:.2f} m/s) under stable load ({fy:.1f} N)"
+                    #             )
 
                     # Record diagnostic values
                     buf["forces"].append(forces[foot].copy())
@@ -308,8 +308,8 @@ class EnergyAnalyzer:
         axs[2].legend(loc="upper right", fontsize=8)
         axs[2].grid(True, linestyle=":", alpha=0.6)
 
-        # plt.tight_layout()
-        # plt.show()
+        plt.tight_layout()
+        plt.show()
 
     def _resample_array(self, times, values):
         if len(times) < 2 or len(values) < 2:
