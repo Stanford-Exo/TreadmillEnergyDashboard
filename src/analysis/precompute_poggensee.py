@@ -4,6 +4,7 @@ import argparse
 import glob
 import os
 import sys
+import traceback
 
 import numpy as np
 import pandas as pd
@@ -211,7 +212,6 @@ class CleanGaitFilter:
             start_check = max(0, i - neighbor_consensus)
             end_check = min(num_blocks, i + neighbor_consensus + 1)
 
-            # Neighborhood evaluation remains purely read-only to avoid invalidation cascades
             is_neighborhood_clean = all(
                 blocks[j]["valid"] for j in range(start_check, end_check)
             )
@@ -440,7 +440,7 @@ def compile_clean_window_row(
         j_pos_r_raw = np.trapz(np.maximum(r_hum, 0), dx=dt_stride)
         j_neg_r_raw = abs(np.trapz(np.minimum(r_hum, 0), dx=dt_stride))
         j_pos_c_raw = np.trapz(np.maximum(c_hum, 0), dx=dt_stride)
-        j_neg_c_raw = abs(np.trapz(c_hum, 0), dx=dt_stride)
+        j_neg_c_raw = abs(np.trapz(np.minimum(c_hum, 0), dx=dt_stride))
         p_mech_no_ach = (
             (4 * j_pos_r_raw + 1 * j_neg_r_raw) + (4 * j_pos_c_raw + 1 * j_neg_c_raw)
         ) / mean_stride_dur
@@ -588,6 +588,7 @@ def process_trial(df, left_body, right_body, trial_name, window_s, min_window_s)
             dt,
             exo_power_left=(tauL_vals[i] * velL_vals[i]),
             exo_power_right=(tauR_vals[i] * velR_vals[i]),
+            is_clean=clean_mask[i],
         )
 
         inst_records.append(
@@ -611,6 +612,7 @@ def process_trial(df, left_body, right_body, trial_name, window_s, min_window_s)
     while current_window_start + window_s <= t_last:
         current_window_end = current_window_start + window_s
 
+        # Rigidly enforce strict containment: cycles must start and end within the window
         window_cycles = [
             c
             for c in clean_cycles
@@ -701,6 +703,7 @@ def process_file_sequential(file_path, window, min_window):
         )
     except Exception as e:
         print(f"  -> Calculation error on {filename}: {e}")
+        traceback.print_exc()
         return None
 
     return trial_rows

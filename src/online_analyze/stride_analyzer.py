@@ -47,7 +47,7 @@ class StrideAnalyzer:
             "stride_length": [],
         }
 
-    def update(self, time, forces, cops):
+    def update(self, time, forces, cops, is_clean=True):
         for foot in ["left", "right"]:
             fy = forces[foot][1]
             is_active = fy > self.contact_threshold
@@ -67,7 +67,7 @@ class StrideAnalyzer:
                 if self.active_stance_start_time[foot] is not None:
                     stride_dur = time - self.active_stance_start_time[foot]
                     # Temporal boundary check: typical walking stride duration is between 0.4 and 1.5 seconds
-                    if 0.4 < stride_dur < 1.5:
+                    if 0.4 < stride_dur < 1.5 and is_clean:
                         self.metrics["stride_duration"].append(stride_dur)
                         self.metrics["stride_frequency"].append(1.0 / stride_dur)
                         if len(self.toe_off_times[foot]) > 0:
@@ -110,7 +110,7 @@ class StrideAnalyzer:
                             self.foot_roll_length - (cop_disp_ap * d_walk)
                         ) / stance_dur
 
-                        if 0.15 < v_belt_inst < 4.0:
+                        if 0.15 < v_belt_inst < 4.0 and is_clean:
                             self.belt_speeds.append((time, v_belt_inst))
                             recent = [s[1] for s in self.belt_speeds[-10:]]
                             if self.override_belt_speed is not None:
