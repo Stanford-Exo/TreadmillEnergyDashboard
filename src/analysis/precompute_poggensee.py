@@ -173,16 +173,60 @@ def compile_window_row(df_win, analyzer, trial_name, window_start_s):
 
     exo_power_net = (np.trapz(ref_exo_mean, dx=dt_stride) + np.trapz(con_exo_mean, dx=dt_stride)) / mean_stride_dur
 
+    # --- Calculate stride-by-stride variability on integrated power outputs ---
+    num_strides = len(profiles['ref_sys'])
+    stride_mech_powers = []
+    stride_mech_powers_no_achilles = []
+    stride_exo_powers = []
+
+    for s_idx in range(num_strides):
+        # A. Stance Leg Muscle (With Achilles model)
+        r_mus = ref_mus_raw[s_idx]
+        c_mus = con_mus_raw[s_idx]
+        j_pos_r = np.trapz(np.maximum(r_mus, 0), dx=dt_stride)
+        j_neg_r = abs(np.trapz(np.minimum(r_mus, 0), dx=dt_stride))
+        j_pos_c = np.trapz(np.maximum(c_mus, 0), dx=dt_stride)
+        j_neg_c = abs(np.trapz(np.minimum(c_mus, 0), dx=dt_stride))
+        p_mech = ((4 * j_pos_r + 1 * j_neg_r) + (4 * j_pos_c + 1 * j_neg_c)) / mean_stride_dur
+        stride_mech_powers.append(p_mech)
+
+        # B. Human Power (No Achilles model)
+        r_hum = np.array(profiles['ref_hum'][s_idx])
+        c_hum = np.array(profiles['contra_hum'][s_idx])
+        j_pos_r_raw = np.trapz(np.maximum(r_hum, 0), dx=dt_stride)
+        j_neg_r_raw = abs(np.trapz(np.minimum(r_hum, 0), dx=dt_stride))
+        j_pos_c_raw = np.trapz(np.maximum(c_hum, 0), dx=dt_stride)
+        j_neg_c_raw = abs(np.trapz(np.minimum(c_hum, 0), dx=dt_stride))
+        p_mech_no_ach = ((4 * j_pos_r_raw + 1 * j_neg_r_raw) + (4 * j_pos_c_raw + 1 * j_neg_c_raw)) / mean_stride_dur
+        stride_mech_powers_no_achilles.append(p_mech_no_ach)
+
+        # C. Exo Power
+        r_exo = ref_exo_raw[s_idx]
+        c_exo = con_exo_raw[s_idx]
+        p_exo = (np.trapz(r_exo, dx=dt_stride) + np.trapz(c_exo, dx=dt_stride)) / mean_stride_dur
+        stride_exo_powers.append(p_exo)
+
+    mech_power_std = float(np.std(stride_mech_powers)) if stride_mech_powers else 0.0
+    mech_power_no_ach_std = float(np.std(stride_mech_powers_no_achilles)) if stride_mech_powers_no_achilles else 0.0
+    exo_power_std = float(np.std(stride_exo_powers)) if stride_exo_powers else 0.0
+
     # 4. Build Wide Row
     row = {
         'trial_name': trial_name,
         'window_start_s': float(window_start_s),
         'mean_stride_duration_s': mean_stride_dur,
         'mean_duty_factor': stats.get('duty_factor_mean', 0.6),
+        'duty_factor_std': stats.get('duty_factor_std', 0.015),
+        'num_valid_strides': len(profiles['ref_sys']),
+        'bio_watts': bio_watts,
+        'standing_baseline_w': standing_baseline,
         'net_bio_cost_w': net_bio_watts,
         'mechanical_power': est_mech_watts,
+        'mechanical_power_std': mech_power_std,
         'mechanical_power_no_achilles': est_mech_watts_no_achilles,
-        'exo_power': exo_power_net
+        'mechanical_power_no_achilles_std': mech_power_no_ach_std,
+        'exo_power': exo_power_net,
+        'exo_power_std': exo_power_std
     }
 
     # Inject all 1D bucket columns

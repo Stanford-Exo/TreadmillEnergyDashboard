@@ -100,3 +100,7 @@ The goal of the visualizations is to help us make decisions about how to improve
 ### Primary Visualization: Energy Loops
 
 We have a stacked area chart, where we separately identify human and exoskeleton power. The x-axis of the chart is the CoP location on the treadmill, which is a good proxy for stance phase percentage.
+
+# Historic Exoskeleton Data Analysis
+
+We can use this method to analyze the giant dataset that Katie Poggensee collected during her PhD, "How adaptation, training, and customization contribute to benefits from exoskeleton assistance" (https://www.science.org/doi/10.1126/scirobotics.abf1078). You can download the data here: https://searchworks.stanford.edu/catalog?f%5Bcollection%5D%5B%5D=pp784wp5100
