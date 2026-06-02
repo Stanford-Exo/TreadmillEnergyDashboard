@@ -1,5 +1,7 @@
 apply_fixes.py
 *.gif
+exported_pogensee/*.txt
+profile.stats
 
 # ==============================================================================
 # System & IDE Metadata

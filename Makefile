@@ -7,10 +7,10 @@ PYTHON = python3
 # This allows running: make validate plot
 ifeq (validate,$(firstword $(MAKECMDGOALS)))
   VALIDATE_ARGS := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
-  
+
   # Translate positional target words to script flags (e.g., 'plot' -> '--plot')
   VALIDATE_FLAGS := $(subst plot,--plot,$(VALIDATE_ARGS))
-  
+
   # Turn trailing arguments into empty do-nothing targets to prevent "No rule to make target" errors
   $(eval $(VALIDATE_ARGS):;@:)
 endif
@@ -19,10 +19,10 @@ endif
 # This allows running: make validate-strides plot
 ifeq (validate-strides,$(firstword $(MAKECMDGOALS)))
   STRIDES_ARGS := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
-  
+
   # Translate positional target words to script flags (e.g., 'plot' -> '--plot')
   STRIDES_FLAGS := $(subst plot,--plot,$(STRIDES_ARGS))
-  
+
   # Turn trailing arguments into empty do-nothing targets to prevent "No rule to make target" errors
   $(eval $(STRIDES_ARGS):;@:)
 endif
@@ -49,6 +49,11 @@ export-poggensee:
 
 precompute-poggensee:
 	PYTHONPATH=src $(PYTHON) -m analysis.precompute_poggensee
+
+# Run the precompute script through the cProfile profiler
+profile-poggensee:
+		PYTHONPATH=src $(PYTHON) -m cProfile -o profile.stats -m analysis.precompute_poggensee
+		snakeviz profile.stats
 
 animate-poggensee:
 	PYTHONPATH=src $(PYTHON) -m analysis.animate_adaptation --save
