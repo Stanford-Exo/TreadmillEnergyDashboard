@@ -2,9 +2,9 @@
 
 import argparse
 import glob
+import multiprocessing
 import os
 import sys
-import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
@@ -40,7 +40,7 @@ def njit_opt(func):
 
 @njit_opt
 def trapz_1d(y, dx):
-    """JIT-compiled trapezoidal integration."""
+    """JIT-compiled trapzal integration."""
     n = len(y)
     if n < 2:
         return 0.0
@@ -213,49 +213,55 @@ def compile_window_row(df_win, analyzer, trial_name, window_start_s):
     ref_mus_raw, ref_ach_raw = np.array(ref_mus_raw), np.array(ref_ach_raw)
     con_mus_raw, con_ach_raw = np.array(con_mus_raw), np.array(con_ach_raw)
 
-    ref_exo_mean, ref_exo_std = np.mean(ref_exo_raw, axis=0), np.std(
-        ref_exo_raw, axis=0
+    ref_exo_mean, ref_exo_std = (
+        np.mean(ref_exo_raw, axis=0),
+        np.std(ref_exo_raw, axis=0),
     )
-    con_exo_mean, con_exo_std = np.mean(con_exo_raw, axis=0), np.std(
-        con_exo_raw, axis=0
-    )
-
-    ref_mus_mean, ref_mus_std = np.mean(ref_mus_raw, axis=0), np.std(
-        ref_mus_raw, axis=0
-    )
-    ref_ach_mean, ref_ach_std = np.mean(ref_ach_raw, axis=0), np.std(
-        ref_ach_raw, axis=0
+    con_exo_mean, con_exo_std = (
+        np.mean(con_exo_raw, axis=0),
+        np.std(con_exo_raw, axis=0),
     )
 
-    con_mus_mean, con_mus_std = np.mean(con_mus_raw, axis=0), np.std(
-        con_mus_raw, axis=0
+    ref_mus_mean, ref_mus_std = (
+        np.mean(ref_mus_raw, axis=0),
+        np.std(ref_mus_raw, axis=0),
     )
-    con_ach_mean, con_ach_std = np.mean(con_ach_raw, axis=0), np.std(
-        con_ach_raw, axis=0
+    ref_ach_mean, ref_ach_std = (
+        np.mean(ref_ach_raw, axis=0),
+        np.std(ref_ach_raw, axis=0),
+    )
+
+    con_mus_mean, con_mus_std = (
+        np.mean(con_mus_raw, axis=0),
+        np.std(con_mus_raw, axis=0),
+    )
+    con_ach_mean, con_ach_std = (
+        np.mean(con_ach_raw, axis=0),
+        np.std(con_ach_raw, axis=0),
     )
 
     # Calculate summary metabolic scalars
-    j_pos_ref = np.trapezoid(np.maximum(ref_mus_mean, 0), dx=dt_stride)
-    j_neg_ref = abs(np.trapezoid(np.minimum(ref_mus_mean, 0), dx=dt_stride))
-    j_pos_con = np.trapezoid(np.maximum(con_mus_mean, 0), dx=dt_stride)
-    j_neg_con = abs(np.trapezoid(np.minimum(con_mus_mean, 0), dx=dt_stride))
+    j_pos_ref = np.trapz(np.maximum(ref_mus_mean, 0), dx=dt_stride)
+    j_neg_ref = abs(np.trapz(np.minimum(ref_mus_mean, 0), dx=dt_stride))
+    j_pos_con = np.trapz(np.maximum(con_mus_mean, 0), dx=dt_stride)
+    j_neg_con = abs(np.trapz(np.minimum(con_mus_mean, 0), dx=dt_stride))
     est_mech_watts = (
         (4 * j_pos_ref + 1 * j_neg_ref) + (4 * j_pos_con + 1 * j_neg_con)
     ) / mean_stride_dur
 
     ref_hum_mean = np.mean(np.array(profiles["ref_hum"]), axis=0)
     con_hum_mean = np.mean(np.array(profiles["contra_hum"]), axis=0)
-    j_pos_ref_raw = np.trapezoid(np.maximum(ref_hum_mean, 0), dx=dt_stride)
-    j_neg_ref_raw = abs(np.trapezoid(np.minimum(ref_hum_mean, 0), dx=dt_stride))
-    j_pos_con_raw = np.trapezoid(np.maximum(con_hum_mean, 0), dx=dt_stride)
-    j_neg_con_raw = abs(np.trapezoid(np.minimum(con_hum_mean, 0), dx=dt_stride))
+    j_pos_ref_raw = np.trapz(np.maximum(ref_hum_mean, 0), dx=dt_stride)
+    j_neg_ref_raw = abs(np.trapz(np.minimum(ref_hum_mean, 0), dx=dt_stride))
+    j_pos_con_raw = np.trapz(np.maximum(con_hum_mean, 0), dx=dt_stride)
+    j_neg_con_raw = abs(np.trapz(np.minimum(con_hum_mean, 0), dx=dt_stride))
     est_mech_watts_no_achilles = (
         (4 * j_pos_ref_raw + 1 * j_neg_ref_raw)
         + (4 * j_pos_con_raw + 1 * j_neg_con_raw)
     ) / mean_stride_dur
 
     exo_power_net = (
-        np.trapezoid(ref_exo_mean, dx=dt_stride) + np.trapezoid(con_exo_mean, dx=dt_stride)
+        np.trapz(ref_exo_mean, dx=dt_stride) + np.trapz(con_exo_mean, dx=dt_stride)
     ) / mean_stride_dur
 
     # Calculate stride-by-stride variability on integrated power outputs
@@ -267,10 +273,10 @@ def compile_window_row(df_win, analyzer, trial_name, window_start_s):
     for s_idx in range(num_strides):
         r_mus = ref_mus_raw[s_idx]
         c_mus = con_mus_raw[s_idx]
-        j_pos_r = np.trapezoid(np.maximum(r_mus, 0), dx=dt_stride)
-        j_neg_r = abs(np.trapezoid(np.minimum(r_mus, 0), dx=dt_stride))
-        j_pos_c = np.trapezoid(np.maximum(c_mus, 0), dx=dt_stride)
-        j_neg_c = abs(np.trapezoid(np.minimum(c_mus, 0), dx=dt_stride))
+        j_pos_r = np.trapz(np.maximum(r_mus, 0), dx=dt_stride)
+        j_neg_r = abs(np.trapz(np.minimum(r_mus, 0), dx=dt_stride))
+        j_pos_c = np.trapz(np.maximum(c_mus, 0), dx=dt_stride)
+        j_neg_c = abs(np.trapz(np.minimum(c_mus, 0), dx=dt_stride))
         p_mech = (
             (4 * j_pos_r + 1 * j_neg_r) + (4 * j_pos_c + 1 * j_neg_c)
         ) / mean_stride_dur
@@ -278,10 +284,10 @@ def compile_window_row(df_win, analyzer, trial_name, window_start_s):
 
         r_hum = np.array(profiles["ref_hum"][s_idx])
         c_hum = np.array(profiles["contra_hum"][s_idx])
-        j_pos_r_raw = np.trapezoid(np.maximum(r_hum, 0), dx=dt_stride)
-        j_neg_r_raw = abs(np.trapezoid(np.minimum(r_hum, 0), dx=dt_stride))
-        j_pos_c_raw = np.trapezoid(np.maximum(c_hum, 0), dx=dt_stride)
-        j_neg_c_raw = abs(np.trapezoid(np.minimum(c_hum, 0), dx=dt_stride))
+        j_pos_r_raw = np.trapz(np.maximum(r_hum, 0), dx=dt_stride)
+        j_neg_r_raw = abs(np.trapz(np.minimum(r_hum, 0), dx=dt_stride))
+        j_pos_c_raw = np.trapz(np.maximum(c_hum, 0), dx=dt_stride)
+        j_neg_c_raw = abs(np.trapz(np.minimum(c_hum, 0), dx=dt_stride))
         p_mech_no_ach = (
             (4 * j_pos_r_raw + 1 * j_neg_r_raw) + (4 * j_pos_c_raw + 1 * j_neg_c_raw)
         ) / mean_stride_dur
@@ -290,7 +296,7 @@ def compile_window_row(df_win, analyzer, trial_name, window_start_s):
         r_exo = ref_exo_raw[s_idx]
         c_exo = con_exo_raw[s_idx]
         p_exo = (
-            np.trapezoid(r_exo, dx=dt_stride) + np.trapezoid(c_exo, dx=dt_stride)
+            np.trapz(r_exo, dx=dt_stride) + np.trapz(c_exo, dx=dt_stride)
         ) / mean_stride_dur
         stride_exo_powers.append(p_exo)
 
@@ -518,7 +524,7 @@ def main():
     parser.add_argument(
         "--workers",
         type=int,
-        default=len(os.sched_getaffinity(0)),
+        default=4,
         help="Number of CPU workers to parallelize execution",
     )
     args = parser.parse_args()
@@ -575,7 +581,9 @@ def main():
         _ = extract_biological_components(dummy_power, 0.01)
     # ------------------------------
 
-    print(f"\nDispatching {len(files_to_process)} trial(s) to {args.workers} workers...")
+    print(
+        f"\nDispatching {len(files_to_process)} trial(s) to {args.workers} workers..."
+    )
 
     # Parallel Execution Pool
     with ProcessPoolExecutor(max_workers=args.workers) as executor:

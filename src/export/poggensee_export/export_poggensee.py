@@ -1,38 +1,38 @@
 import argparse
 import os
 import sys
-import zipfile
-import io
-import multiprocessing
-from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
 import scipy.io
 
+# Ensure required libraries for Parquet serialization are present
 try:
     import pyarrow
 except ImportError:
     print("Warning: 'pyarrow' is not installed. Saving parquet files might fail.")
     print("Please run: pip install pyarrow")
 
+# Setup script-relative paths
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "../../../"))
-DEFAULT_INPUT_DIR = "../../pognc_data"
+DEFAULT_INPUT_DIR = "/Users/keenonwerling/Desktop/data/Katie Exoskeleton"
 DEFAULT_OUTPUT_DIR = os.path.join(REPO_ROOT, "exported_pogensee")
 
 
-def load_mat_file(file_bytes):
-    """Loads a .mat file directly from memory bytes, falling back to h5py for v7.3 formats."""
+def load_mat_file(file_path):
+    """Loads a .mat file, falling back to h5py for v7.3 formats."""
     try:
-        return scipy.io.loadmat(io.BytesIO(file_bytes)), False
+        return scipy.io.loadmat(file_path), False
     except NotImplementedError:
         try:
             import h5py
 
-            return h5py.File(io.BytesIO(file_bytes), "r"), True
+            return h5py.File(file_path, "r"), True
         except ImportError:
-            print("Error: MATLAB v7.3 format requires the 'h5py' package.")
+            print(
+                f"Error: {file_path} is in MATLAB v7.3 format which requires the 'h5py' package."
+            )
             print("Please run: pip install h5py")
             raise
 
@@ -49,43 +49,127 @@ def get_array(data, key, is_v73):
 
 
 def half_sample_mode(data):
+    """
+    Computes the Half-Sample Mode of a 1D array.
+    Recursively isolates the densest interval containing 50% of the samples.
+    """
     if len(data) == 0:
         return 0.0
-
     pts = np.sort(data)
-
     while len(pts) > 3:
         n = len(pts)
         half = n // 2
         ranges = pts[half - 1 :] - pts[: -half + 1]
         min_idx = np.argmin(ranges)
         pts = pts[min_idx : min_idx + half]
-
     return float(np.mean(pts))
 
 
-def estimate_channel_bias(data, threshold=40.0):
-    candidates = data[np.abs(data) < threshold]
-    if len(candidates) == 0:
-        return 0.0
-    return half_sample_mode(candidates)
+def calculate_signals_with_biases(raw_signals, biases, quiet_masks):
+    """Applies a set of biases to yield clean and zero-gated signals."""
+    zeroed_clean = {"L": {}, "R": {}}
+    zeroed_forced = {"L": {}, "R": {}}
+
+    for side in ["L", "R"]:
+        for axis in ["Fx", "Fy", "Fz", "Mx", "My", "Mz"]:
+            sig_raw = raw_signals[side][axis]
+            bias_val = biases[side][axis]
+            sig_clean = sig_raw - bias_val
+
+            # Enforce strictly non-negative vertical force
+            if axis == "Fz":
+                sig_clean = np.maximum(sig_clean, 0.0)
+
+            zeroed_clean[side][axis] = sig_clean
+
+        # Define quiet/swing state mask (quiet baseline window OR vertical force below 10N)
+        corrected_fz = zeroed_clean[side]["Fz"]
+        swing_gate_mask = quiet_masks[side] | (corrected_fz < 10.0)
+
+        for axis in ["Fx", "Fy", "Fz", "Mx", "My", "Mz"]:
+            sig_forced = zeroed_clean[side][axis].copy()
+            sig_forced[swing_gate_mask] = 0.0
+            zeroed_forced[side][axis] = sig_forced
+
+    return zeroed_clean, zeroed_forced
 
 
-def estimate_moment_bias(moment_data, vertical_force, force_threshold=40.0):
-    unloaded_idx = np.abs(vertical_force) < force_threshold
-    candidates = moment_data[unloaded_idx]
-    if len(candidates) == 0:
-        return 0.0
-    return half_sample_mode(candidates)
+def optimize_offsets(raw_signals, max_fz_adjust=5.0, contact_thresh=30.0):
+    """
+    Executes a two-pass optimization on raw multi-axial force plate signals:
+    Pass 1: Identifies baseline quiet offsets using a percentile-filtered Half-Sample Mode.
+    Pass 2: Equalizes vertical single-support means and centers horizontal global means to 0.0.
+    """
+    biases = {"L": {}, "R": {}}
+    quiet_masks = {}
+
+    # Pass 1: Baseline Quiet Offsets
+    for side in ["L", "R"]:
+        fz_raw = raw_signals[side]["Fz"]
+        fz_low_threshold = np.percentile(fz_raw, 30)
+        fz_quiet_subset = fz_raw[fz_raw <= fz_low_threshold]
+        bias_Fz_base = half_sample_mode(fz_quiet_subset)
+
+        quiet_mask = (fz_raw >= bias_Fz_base - 10.0) & (fz_raw <= bias_Fz_base + 10.0)
+        quiet_masks[side] = quiet_mask
+
+        for axis in ["Fx", "Fy", "Fz", "Mx", "My", "Mz"]:
+            sig_raw = raw_signals[side][axis]
+            biases[side][axis] = (
+                float(np.mean(sig_raw[quiet_mask])) if np.any(quiet_mask) else 0.0
+            )
+
+    zeroed_clean, zeroed_forced = calculate_signals_with_biases(
+        raw_signals, biases, quiet_masks
+    )
+
+    # Pass 2: Vertical Equalization & Horizontal Centering
+    L_SS_mask = (zeroed_forced["L"]["Fz"] > contact_thresh) & (
+        zeroed_forced["R"]["Fz"] == 0.0
+    )
+    R_SS_mask = (zeroed_forced["R"]["Fz"] > contact_thresh) & (
+        zeroed_forced["L"]["Fz"] == 0.0
+    )
+
+    # Equalize vertical support loads
+    f_z_adjust_L, f_z_adjust_R = 0.0, 0.0
+    if np.any(L_SS_mask) and np.any(R_SS_mask):
+        mean_L_SS = np.mean(zeroed_forced["L"]["Fz"][L_SS_mask])
+        mean_R_SS = np.mean(zeroed_forced["R"]["Fz"][R_SS_mask])
+
+        difference_fz = mean_L_SS - mean_R_SS
+        f_z_adjust_L = np.clip(difference_fz / 2.0, -max_fz_adjust, max_fz_adjust)
+        f_z_adjust_R = np.clip(-difference_fz / 2.0, -max_fz_adjust, max_fz_adjust)
+
+        biases["L"]["Fz"] += f_z_adjust_L
+        biases["R"]["Fz"] += f_z_adjust_R
+
+    # Centering horizontal channels
+    horizontal_adjustments = {"L": {"Fx": 0.0, "Fy": 0.0}, "R": {"Fx": 0.0, "Fy": 0.0}}
+    for side in ["L", "R"]:
+        for axis in ["Fx", "Fy"]:
+            trial_mean = np.mean(zeroed_clean[side][axis])
+            horizontal_adjustments[side][axis] = trial_mean
+            biases[side][axis] += trial_mean
+
+    # Recompute using refined calibration biases
+    zeroed_clean, zeroed_forced = calculate_signals_with_biases(
+        raw_signals, biases, quiet_masks
+    )
+
+    return (
+        zeroed_clean,
+        zeroed_forced,
+        biases,
+        (f_z_adjust_L, f_z_adjust_R),
+        horizontal_adjustments,
+    )
 
 
-def process_qs_worker(zip_path, internal_path):
-    """Worker function to process a single QS file from a zip in memory."""
+def calculate_qs_baseline(file_path):
+    """Loads a QS .mat file and extracts the average metabolic Watts."""
     try:
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            file_bytes = zf.read(internal_path)
-
-        mat_data, is_v73 = load_mat_file(file_bytes)
+        mat_data, is_v73 = load_mat_file(file_path)
         keys = list(mat_data.keys())
 
         vo2_key = next((k for k in keys if k.lower() == "vo2"), None)
@@ -105,25 +189,24 @@ def process_qs_worker(zip_path, internal_path):
                 else:
                     vco2_mean = 0.85 * vo2_mean
 
+                # Convert to Watts
                 cal_per_min = 3.941 * vo2_mean + 1.106 * vco2_mean
                 bio_watts = cal_per_min * 4.184 / 60.0
 
                 if is_v73:
                     mat_data.close()
-                return f"{zip_path}/{internal_path}", bio_watts
+                return bio_watts
 
         if is_v73:
             mat_data.close()
-        return f"{zip_path}/{internal_path}", None
-
+        return None
     except Exception as e:
-        print(
-            f"    Failed to extract baseline from {internal_path} inside {os.path.basename(zip_path)}: {e}"
-        )
-        return f"{zip_path}/{internal_path}", None
+        print(f"    Failed to extract baseline from {file_path}: {e}")
+        return None
 
 
 def get_best_qs_match(target_path, qs_baselines):
+    """Finds the QS file that shares the longest common directory path with the target."""
     if not qs_baselines:
         return None, None
 
@@ -139,91 +222,81 @@ def get_best_qs_match(target_path, qs_baselines):
     return best_qs, qs_baselines[best_qs] if best_qs else None
 
 
-def export_trial_worker(
-    zip_path, internal_path, output_dir, baseline_w=None, matched_qs_path=None
+def export_trial(
+    file_path, input_dir, output_dir, baseline_w=None, matched_qs_path=None
 ):
-    """Worker function to read, transform, clean, and export a trial completely in memory."""
-    try:
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            file_bytes = zf.read(internal_path)
+    """Translates a single Pogensee .mat file to a transformed, zero-corrected Parquet file."""
+    rel_path_for_display = os.path.relpath(file_path, input_dir)
+    print(f"\n  Processing: {rel_path_for_display}")
 
-        mat_data, is_v73 = load_mat_file(file_bytes)
+    try:
+        mat_data, is_v73 = load_mat_file(file_path)
     except Exception as e:
-        return f"Skipping {internal_path}: Unable to parse mat file structure. {e}"
+        print(f"    Skipping {file_path}: Unable to parse mat file structure. {e}")
+        return
 
+    # Extract raw force, torque, and temporal arrays
     try:
-        LFx = get_array(mat_data, "LFx", is_v73).copy()
-        LFy = get_array(mat_data, "LFy", is_v73).copy()
-        LFz = get_array(mat_data, "LFz", is_v73).copy()
-        LMx = get_array(mat_data, "LMx", is_v73).copy()
-        LMy = get_array(mat_data, "LMy", is_v73).copy()
-        LMz = get_array(mat_data, "LMz", is_v73).copy()
-
-        RFx = get_array(mat_data, "RFx", is_v73).copy()
-        RFy = get_array(mat_data, "RFy", is_v73).copy()
-        RFz = get_array(mat_data, "RFz", is_v73).copy()
-        RMx = get_array(mat_data, "RMx", is_v73).copy()
-        RMy = get_array(mat_data, "RMy", is_v73).copy()
-        RMz = get_array(mat_data, "RMz", is_v73).copy()
-
-        time = get_array(mat_data, "time", is_v73)
+        raw_signals = {
+            "L": {
+                "Fx": get_array(mat_data, "LFx", is_v73).copy(),
+                "Fy": get_array(mat_data, "LFy", is_v73).copy(),
+                "Fz": get_array(mat_data, "LFz", is_v73).copy(),
+                "Mx": get_array(mat_data, "LMx", is_v73).copy(),
+                "My": get_array(mat_data, "LMy", is_v73).copy(),
+                "Mz": get_array(mat_data, "LMz", is_v73).copy(),
+            },
+            "R": {
+                "Fx": get_array(mat_data, "RFx", is_v73).copy(),
+                "Fy": get_array(mat_data, "RFy", is_v73).copy(),
+                "Fz": get_array(mat_data, "RFz", is_v73).copy(),
+                "Mx": get_array(mat_data, "RMx", is_v73).copy(),
+                "My": get_array(mat_data, "RMy", is_v73).copy(),
+                "Mz": get_array(mat_data, "RMz", is_v73).copy(),
+            },
+            "time": get_array(mat_data, "time", is_v73),
+        }
     except KeyError as e:
+        print(f"    Skipping {file_path}: Missing target variables {e}")
         if is_v73:
             mat_data.close()
-        return f"Skipping {internal_path}: Missing target variables {e}"
+        return
 
-    bias_LFx = estimate_channel_bias(LFx, threshold=40.0)
-    bias_LFy = estimate_channel_bias(LFy, threshold=40.0)
-    bias_LFz = estimate_channel_bias(LFz, threshold=40.0)
+    # Run the optimized Two-Pass Calibration
+    _, zeroed_forced, biases, vertical_adjusts, horizontal_adjusts = optimize_offsets(
+        raw_signals
+    )
 
-    bias_RFx = estimate_channel_bias(RFx, threshold=40.0)
-    bias_RFy = estimate_channel_bias(RFy, threshold=40.0)
-    bias_RFz = estimate_channel_bias(RFz, threshold=40.0)
+    # Deconstruct optimized forced signals for global biomechanical calculations
+    LFx_clean = zeroed_forced["L"]["Fx"]
+    LFy_clean = zeroed_forced["L"]["Fy"]
+    LFz_clean = zeroed_forced["L"]["Fz"]
+    LMx_clean = zeroed_forced["L"]["Mx"]
+    LMy_clean = zeroed_forced["L"]["My"]
+    LMz_clean = zeroed_forced["L"]["Mz"]
 
-    bias_LMx = estimate_moment_bias(LMx, LFz, force_threshold=40.0)
-    bias_LMy = estimate_moment_bias(LMy, LFz, force_threshold=40.0)
-    bias_LMz = estimate_moment_bias(LMz, LFz, force_threshold=40.0)
+    RFx_clean = zeroed_forced["R"]["Fx"]
+    RFy_clean = zeroed_forced["R"]["Fy"]
+    RFz_clean = zeroed_forced["R"]["Fz"]
+    RMx_clean = zeroed_forced["R"]["Mx"]
+    RMy_clean = zeroed_forced["R"]["My"]
+    RMz_clean = zeroed_forced["R"]["Mz"]
 
-    bias_RMx = estimate_moment_bias(RMx, RFz, force_threshold=40.0)
-    bias_RMy = estimate_moment_bias(RMy, RFz, force_threshold=40.0)
-    bias_RMz = estimate_moment_bias(RMz, RFz, force_threshold=40.0)
+    # Print log of optimized adjustments to standard output for review
+    print(f"    Optimized Zero-Bias Offsets:")
+    print(
+        f"      Left Plate  -> Fx: {biases['L']['Fx']:+.3f} N (Centered), Fy: {biases['L']['Fy']:+.3f} N (Centered), Fz: {biases['L']['Fz']:+.3f} N"
+    )
+    print(f"                  -> Equalization adjustment: {vertical_adjusts[0]:+.3f} N")
+    print(
+        f"      Right Plate -> Fx: {biases['R']['Fx']:+.3f} N (Centered), Fy: {biases['R']['Fy']:+.3f} N (Centered), Fz: {biases['R']['Fz']:+.3f} N"
+    )
+    print(f"                  -> Equalization adjustment: {vertical_adjusts[1]:+.3f} N")
 
-    LFx_clean = LFx - bias_LFx
-    LFy_clean = LFy - bias_LFy
-    LFz_clean = LFz - bias_LFz
-    LMx_clean = LMx - bias_LMx
-    LMy_clean = LMy - bias_LMy
-    LMz_clean = LMz - bias_LMz
-
-    RFx_clean = RFx - bias_RFx
-    RFy_clean = RFy - bias_RFy
-    RFz_clean = RFz - bias_RFz
-    RMx_clean = RMx - bias_RMx
-    RMy_clean = RMy - bias_RMy
-    RMz_clean = RMz - bias_RMz
-
-    norm_l = np.sqrt(LFx_clean**2 + LFy_clean**2 + LFz_clean**2)
-    norm_r = np.sqrt(RFx_clean**2 + RFy_clean**2 + RFz_clean**2)
-
-    under_threshold_l = norm_l < 5.0
-    under_threshold_r = norm_r < 5.0
-
-    LFx_clean[under_threshold_l] = 0.0
-    LFy_clean[under_threshold_l] = 0.0
-    LFz_clean[under_threshold_l] = 0.0
-    LMx_clean[under_threshold_l] = 0.0
-    LMy_clean[under_threshold_l] = 0.0
-    LMz_clean[under_threshold_l] = 0.0
-
-    RFx_clean[under_threshold_r] = 0.0
-    RFy_clean[under_threshold_r] = 0.0
-    RFz_clean[under_threshold_r] = 0.0
-    RMx_clean[under_threshold_r] = 0.0
-    RMy_clean[under_threshold_r] = 0.0
-    RMz_clean[under_threshold_r] = 0.0
-
+    # 15mm sensor depth offset in meters (vertical dimension)
     z0 = -0.015
 
+    # Compute Local Center of Pressures (CoPs) with division guards
     with np.errstate(divide="ignore", invalid="ignore"):
         cop_l_x_local = np.where(
             np.abs(LFz_clean) > 0.0, (-LMy_clean + z0 * LFx_clean) / LFz_clean, 0.0
@@ -239,6 +312,7 @@ def export_trial_worker(
             np.abs(RFz_clean) > 0.0, (RMx_clean + z0 * RFy_clean) / RFz_clean, 0.0
         )
 
+    # Compute Local Free Torque about vertical axis at CoP: Tz = Mz - (x * Fy - y * Fx)
     torque_l_z_local = LMz_clean - (
         cop_l_x_local * LFy_clean - cop_l_y_local * LFx_clean
     )
@@ -246,13 +320,19 @@ def export_trial_worker(
         cop_r_x_local * RFy_clean - cop_r_y_local * RFx_clean
     )
 
+    # Populate primary output mapping
     df = pd.DataFrame()
-    df["frame"] = np.arange(len(time))
-    df["time"] = time
+    df["frame"] = np.arange(len(raw_signals["time"]))
+    df["time"] = raw_signals["time"]
 
+    # Insert Dynamic Quiet Standing (QS) baseline if found
     if baseline_w is not None:
         df["qs_baseline_w"] = baseline_w
+        print(
+            f"    Applied QS Baseline: {baseline_w:.1f} W (Matched: {os.path.basename(matched_qs_path)})"
+        )
 
+    # Map Left Foot GRF and CoP to global (Y-up, right-handed system)
     df["calcn_l_force_x"] = -LFy_clean
     df["calcn_l_force_y"] = LFz_clean
     df["calcn_l_force_z"] = LFx_clean
@@ -265,6 +345,7 @@ def export_trial_worker(
     df["calcn_l_torque_y"] = -torque_l_z_local
     df["calcn_l_torque_z"] = 0.0
 
+    # Map Right Foot GRF and CoP to global
     df["calcn_r_force_x"] = -RFy_clean
     df["calcn_r_force_y"] = RFz_clean
     df["calcn_r_force_z"] = RFx_clean
@@ -277,6 +358,7 @@ def export_trial_worker(
     df["calcn_r_torque_y"] = -torque_r_z_local
     df["calcn_r_torque_z"] = 0.0
 
+    # Populate zeroed estimation placeholders to prevent downstream KeyErrors
     for col in [
         "com_pos_x",
         "com_pos_y",
@@ -290,6 +372,7 @@ def export_trial_worker(
     ]:
         df[col] = 0.0
 
+    # Translate and copy auxiliary non-coordinate parameters from the .mat source
     keys_to_skip = {
         "LFx",
         "LFy",
@@ -311,38 +394,41 @@ def export_trial_worker(
         if key not in keys_to_skip and not key.startswith("_"):
             try:
                 df[key] = get_array(mat_data, key, is_v73)
-            except Exception:
-                pass
+            except Exception as e:
+                print(
+                    f"      Warning: Could not translate auxiliary parameter '{key}': {e}"
+                )
 
+    # Ensure v7.3 files are cleanly released
     if is_v73:
         mat_data.close()
 
-    # Prepend the zip name to ensure uniqueness if multiple zips have matching folder structures
-    zip_basename = os.path.splitext(os.path.basename(zip_path))[0]
-    rel_path_no_ext = os.path.splitext(internal_path)[0]
+    # Create safe unique filename based on folder path
+    rel_path = os.path.relpath(file_path, input_dir)
+    rel_path_no_ext = os.path.splitext(rel_path)[0]
 
+    # Replace slashes, backslashes, and spaces with underscores
     safe_name = (
-        f"{zip_basename}_{rel_path_no_ext}".replace(os.sep, "_")
+        rel_path_no_ext.replace(os.sep, "_")
         .replace("/", "_")
         .replace("\\", "_")
         .replace(" ", "_")
     )
-
     out_file_path = os.path.join(output_dir, f"{safe_name}.parquet")
-    df.to_parquet(out_file_path, index=False)
 
-    return f"Saved Parquet -> {out_file_path}"
+    df.to_parquet(out_file_path, index=False)
+    print(f"    Saved Parquet -> {out_file_path}")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Process Katie Exoskeleton zip archives to Parquet concurrently in-memory."
+        description="Process Katie Exoskeleton .mat trial files to Parquet."
     )
     parser.add_argument(
         "--dir",
         type=str,
         default=DEFAULT_INPUT_DIR,
-        help="Path to the directory containing .zip files with MATLAB data",
+        help="Path to the directory containing Katie Exoskeleton mat subfolders",
     )
     parser.add_argument(
         "--out",
@@ -350,98 +436,55 @@ def main():
         default=DEFAULT_OUTPUT_DIR,
         help="Target output directory for processed Parquet files",
     )
-    parser.add_argument(
-        "--workers",
-        type=int,
-        default=multiprocessing.cpu_count(),
-        help="Number of parallel workers to use",
-    )
     args = parser.parse_args()
 
     input_dir = os.path.abspath(args.dir)
     output_dir = os.path.abspath(args.out)
 
     if not os.path.exists(input_dir):
+        # Fallback to local execution directory search if default pathing is absent
         print(f"Warning: Primary input folder path not found: {input_dir}")
         input_dir = os.path.abspath("./")
         print(f"Scanning from current working directory: {input_dir}")
 
     os.makedirs(output_dir, exist_ok=True)
 
-    zip_files = []
+    mat_files = []
+    qs_files = []
     for root, _, files in os.walk(input_dir):
         for f in files:
-            if f.endswith(".zip"):
-                zip_files.append(os.path.join(root, f))
+            if f.endswith(".mat") and not f.startswith("."):
+                full_path = os.path.join(root, f)
+                if "QS" in f:
+                    qs_files.append(full_path)
+                else:
+                    mat_files.append(full_path)
 
-    if not zip_files:
-        print(f"No active .zip files found in: {input_dir}")
+    if not mat_files:
+        print(f"No active trial .mat files found in: {input_dir}")
         return
 
-    qs_tasks = []
-    trial_tasks = []
-
-    for z in zip_files:
-        try:
-            with zipfile.ZipFile(z, "r") as zf:
-                for name in zf.namelist():
-                    # Filter for active .mat files while ignoring macos artifact folders
-                    if (
-                        name.endswith(".mat")
-                        and not name.startswith(".")
-                        and "__MACOSX" not in name
-                    ):
-                        if "QS" in name:
-                            qs_tasks.append((z, name))
-                        else:
-                            trial_tasks.append((z, name))
-        except Exception as e:
-            print(f"Warning: Could not open {z} as a zip file. Error: {e}")
-
     print(
-        f"Discovered {len(zip_files)} zip archive(s) containing {len(trial_tasks)} trials and {len(qs_tasks)} QS baselines."
+        f"Found {len(mat_files)} active trial file(s) and {len(qs_files)} QS file(s)."
     )
 
-    # 1. Process all QS Baselines
-    print("\n[Phase 1] Extracting baselines from Quiet Standing (QS) trials...")
-    qs_baselines = dict()
-
-    with ProcessPoolExecutor(max_workers=args.workers) as executor:
-        futures = {
-            executor.submit(process_qs_worker, z_path, i_path): (z_path, i_path)
-            for z_path, i_path in qs_tasks
-        }
-        for future in as_completed(futures):
-            path_key, baseline_val = future.result()
-            if baseline_val is not None:
-                qs_baselines[path_key] = baseline_val
-                print(f"  -> Extracted baseline: {baseline_val:.1f} W from {path_key}")
-
-    # 2. Process all normal Trial Mat Files
-    print(
-        f"\n[Phase 2] Executing parallel export on {len(trial_tasks)} trials using {args.workers} workers..."
-    )
-
-    with ProcessPoolExecutor(max_workers=args.workers) as executor:
-        futures = []
-        for z_path, internal_path in trial_tasks:
-            target_path_key = f"{z_path}/{internal_path}"
-            best_qs_path, baseline_w = get_best_qs_match(target_path_key, qs_baselines)
-
-            futures.append(
-                executor.submit(
-                    export_trial_worker,
-                    z_path,
-                    internal_path,
-                    output_dir,
-                    baseline_w,
-                    best_qs_path,
-                )
+    # Extract baselines from QS files
+    print("\nExtracting baselines from Quiet Standing (QS) trials...")
+    qs_baselines = {}
+    for qs_file in qs_files:
+        baseline = calculate_qs_baseline(qs_file)
+        if baseline is not None:
+            qs_baselines[qs_file] = baseline
+            print(
+                f"  -> Extracted baseline: {baseline:.1f} W from {os.path.basename(qs_file)}"
             )
+        else:
+            print(f"  -> No valid metabolic data in {os.path.basename(qs_file)}")
 
-        for future in as_completed(futures):
-            result = future.result()
-            print(f"  {result}")
+    print("\nBeginning export processing...")
+    for file_path in sorted(mat_files):
+        best_qs_path, baseline_w = get_best_qs_match(file_path, qs_baselines)
+        export_trial(file_path, input_dir, output_dir, baseline_w, best_qs_path)
 
     print("\nExport process completed.")
 
