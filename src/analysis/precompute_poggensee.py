@@ -250,7 +250,7 @@ def compile_window_row(df_win, analyzer, trial_name, window_start_s):
         if stride_mech_powers_no_achilles
         else 0.0
     )
-    exo_power_std = float(np.std(stride_exo_powers)) if stride_exo_powers else 0.0
+    text_exo_power_std = float(np.std(stride_exo_powers)) if stride_exo_powers else 0.0
 
     # 4. Build Wide Row
     row = {
@@ -268,7 +268,7 @@ def compile_window_row(df_win, analyzer, trial_name, window_start_s):
         "mechanical_power_no_achilles": est_mech_watts_no_achilles,
         "mechanical_power_no_achilles_std": mech_power_no_ach_std,
         "exo_power": exo_power_net,
-        "exo_power_std": exo_power_std,
+        "exo_power_std": text_exo_power_std,
     }
 
     # Inject all 1D bucket columns
@@ -474,6 +474,32 @@ def main():
             continue
 
         print(f"\nProcessing {filename}...")
+
+        # Fast metadata-only pass: Read only the time column to verify total duration
+        try:
+            df_time = pd.read_parquet(file_path, columns=["time"])
+            if not df_time.empty:
+                times = df_time["time"].values
+                total_duration = times[-1] - times[0]
+                min_required = args.burn_in + args.min_window
+                if total_duration < min_required:
+                    print(
+                        f"  -> Skipped: Trial duration ({total_duration:.1f}s) is too short to generate a window (minimum required: {min_required:.1f}s)."
+                    )
+                    # Automatically log this trial to prevent rescanning in subsequent runs
+                    try:
+                        with open(skipped_log_path, "a", encoding="utf-8") as f:
+                            f.write(f"{trial_name}\n")
+                        skipped_trials.add(trial_name)
+                    except Exception as write_err:
+                        print(
+                            f"Warning: Could not write skipped trial to log: {write_err}"
+                        )
+                    continue
+        except Exception as e:
+            print(f"  Error reading temporal metadata for {filename}: {e}")
+            continue
+
         try:
             df = pd.read_parquet(file_path)
         except Exception as e:
