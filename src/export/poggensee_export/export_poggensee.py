@@ -94,10 +94,64 @@ def calculate_signals_with_biases(raw_signals, biases, quiet_masks):
     return zeroed_clean, zeroed_forced
 
 
+def apply_percentage_gating(
+    zeroed_clean, zeroed_forced, window_size=7, threshold_pct=0.03
+):
+    """
+    Measures the vertical load percentage carried by each belt.
+    Smoothes this percentage with a moving boxcar average of the specified window size.
+    Anywhere a belt carries less than the threshold percentage (e.g., 3%),
+    all force and torque channels for that belt are forced to exactly 0.0.
+    """
+    Fz_L = zeroed_clean["L"]["Fz"]
+    Fz_R = zeroed_clean["R"]["Fz"]
+    Fz_total = Fz_L + Fz_R
+
+    # Calculate instantaneous load distribution ratios
+    with np.errstate(divide="ignore", invalid="ignore"):
+        pct_L = np.where(Fz_total > 0.0, Fz_L / Fz_total, 0.0)
+        pct_R = np.where(Fz_total > 0.0, Fz_R / Fz_total, 0.0)
+
+    # Boxcar smoothing filter to suppress high-frequency transitions/noise
+    def smooth_signal(sig, w_size):
+        if len(sig) < w_size:
+            return sig
+        window = np.ones(w_size) / w_size
+        padded = np.pad(sig, w_size // 2, mode="edge")
+        smoothed = np.convolve(padded, window, mode="valid")
+        if len(smoothed) > len(sig):
+            smoothed = smoothed[: len(sig)]
+        elif len(smoothed) < len(sig):
+            smoothed = np.pad(smoothed, (0, len(sig) - len(smoothed)), mode="edge")
+        return smoothed
+
+    pct_L_smoothed = smooth_signal(pct_L, window_size)
+    pct_R_smoothed = smooth_signal(pct_R, window_size)
+
+    # Define binary masks where load drops below the threshold
+    gate_L = pct_L_smoothed < threshold_pct
+    gate_R = pct_R_smoothed < threshold_pct
+
+    # Enforce zeros across all channels (forces and torques) on both clean and forced sets
+    for axis in ["Fx", "Fy", "Fz", "Mx", "My", "Mz"]:
+        zeroed_clean["L"][axis] = zeroed_clean["L"][axis].copy()
+        zeroed_clean["R"][axis] = zeroed_clean["R"][axis].copy()
+        zeroed_forced["L"][axis] = zeroed_forced["L"][axis].copy()
+        zeroed_forced["R"][axis] = zeroed_forced["R"][axis].copy()
+
+        zeroed_clean["L"][axis][gate_L] = 0.0
+        zeroed_clean["R"][axis][gate_R] = 0.0
+        zeroed_forced["L"][axis][gate_L] = 0.0
+        zeroed_forced["R"][axis][gate_R] = 0.0
+
+    return zeroed_clean, zeroed_forced
+
+
 def optimize_offsets(raw_signals, max_fz_adjust=5.0, contact_thresh=30.0):
     """
-    Executes a two-pass optimization on raw multi-axial force plate signals:
+    Executes a three-pass optimization on raw multi-axial force plate signals:
     Pass 1: Identifies baseline quiet offsets using a percentile-filtered Half-Sample Mode.
+    Pass 1.5: Applies percentage-based gating to zero out light/spurious contacts below 3% load.
     Pass 2: Equalizes vertical single-support means and centers horizontal global means to 0.0.
     """
     biases = {"L": {}, "R": {}}
@@ -123,7 +177,13 @@ def optimize_offsets(raw_signals, max_fz_adjust=5.0, contact_thresh=30.0):
         raw_signals, biases, quiet_masks
     )
 
+    # Pass 1.5: Gating out low force load shares (< 3%) using a smoothed percentage
+    zeroed_clean, zeroed_forced = apply_percentage_gating(
+        zeroed_clean, zeroed_forced, window_size=15, threshold_pct=0.03
+    )
+
     # Pass 2: Vertical Equalization & Horizontal Centering
+    # Now calculated on the gated signals to prevent swing-phase chatter from corrupting the stance masks
     L_SS_mask = (zeroed_forced["L"]["Fz"] > contact_thresh) & (
         zeroed_forced["R"]["Fz"] == 0.0
     )
@@ -138,8 +198,10 @@ def optimize_offsets(raw_signals, max_fz_adjust=5.0, contact_thresh=30.0):
         mean_R_SS = np.mean(zeroed_forced["R"]["Fz"][R_SS_mask])
 
         difference_fz = mean_L_SS - mean_R_SS
-        f_z_adjust_L = np.clip(difference_fz / 2.0, -max_fz_adjust, max_fz_adjust)
-        f_z_adjust_R = np.clip(-difference_fz / 2.0, -max_fz_adjust, max_fz_adjust)
+        # f_z_adjust_L = np.clip(difference_fz / 2.0, -max_fz_adjust, max_fz_adjust)
+        # f_z_adjust_R = np.clip(-difference_fz / 2.0, -max_fz_adjust, max_fz_adjust)
+        f_z_adjust_L = difference_fz / 2.0
+        f_z_adjust_R = -difference_fz / 2.0
 
         biases["L"]["Fz"] += f_z_adjust_L
         biases["R"]["Fz"] += f_z_adjust_R
@@ -152,9 +214,14 @@ def optimize_offsets(raw_signals, max_fz_adjust=5.0, contact_thresh=30.0):
             horizontal_adjustments[side][axis] = trial_mean
             biases[side][axis] += trial_mean
 
-    # Recompute using refined calibration biases
+    # Recompute base signals using refined calibration biases
     zeroed_clean, zeroed_forced = calculate_signals_with_biases(
         raw_signals, biases, quiet_masks
+    )
+
+    # Re-apply Pass 1.5 gating on final signals to preserve zeroed intervals in output
+    zeroed_clean, zeroed_forced = apply_percentage_gating(
+        zeroed_clean, zeroed_forced, window_size=15, threshold_pct=0.03
     )
 
     return (
