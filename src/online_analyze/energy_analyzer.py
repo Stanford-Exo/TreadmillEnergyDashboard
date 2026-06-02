@@ -24,7 +24,7 @@ class EnergyAnalyzer:
         foot_roll_length=0.254,
         num_gait_points=100,
         override_belt_speed=None,
-        enable_diagnostics=True,
+        enable_diagnostics=False,
     ):
         self.kf = ComKalmanFilter(initial_mass=initial_mass)
         self.stride_analyzer = StrideAnalyzer(
@@ -310,6 +310,8 @@ class EnergyAnalyzer:
 
         # plt.tight_layout()
         # plt.show()
+
+        plt.close(fig)
 
     def _resample_array(self, times, values):
         if len(times) < 2 or len(values) < 2:
