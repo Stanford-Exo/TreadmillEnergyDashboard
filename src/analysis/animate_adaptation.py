@@ -22,23 +22,30 @@ except ImportError:
 DEFAULT_PARQUET_PATH = os.path.abspath(os.path.join(SCRIPT_DIR, "../../exported_pogensee/precomputed_poggensee.parquet"))
 POGGENSEE_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, "../../exported_pogensee"))
 
-# --- Notion Aesthetics ---
+# --- Tufte Aesthetics ---
 plt.rcParams['font.family'] = 'sans-serif'
 plt.rcParams['font.sans-serif'] = ['Inter', '-apple-system', 'Arial', 'sans-serif']
 
 NOTION_BG = "#FFFFFF"
-NOTION_TEXT = "#37352F"
-NOTION_SUBTEXT = "#787774"
+NOTION_TEXT = "#111827"  # High contrast Tufte dark charcoal
+NOTION_SUBTEXT = "#4B5563"  # Mid gray
 
-# Colors for Stance Leg (Solid)
-NOTION_REF_EXO = "#D3E5EF"      
-NOTION_REF_MUS = "#D4B89F"  
+# Colors for Stance Leg (Solid fills)
+NOTION_REF_EXO = "#B9E2F5"  # Soft muted blue (Exoskeleton assistance)
+NOTION_REF_ACH = "#D1D5DB"  # Neutral grey (Passive elastic Achilles)
+NOTION_REF_MUS = "#FCA5A5"  # Soft red (Active metabolic human muscle)
 
-# Colors for Swing Leg (Extremely Light Solid)
-NOTION_CON_EXO_FACE = "#F2F6F9"
-NOTION_CON_EXO_EDGE = "#8EB0C6"
-NOTION_CON_MUS_FACE = "#F7F2EE"
-NOTION_CON_MUS_EDGE = "#B59475"
+# Colors for Swing Leg (Subtle face fills with colored edges)
+NOTION_CON_EXO_FACE = "#F0F9FF"
+NOTION_CON_EXO_EDGE = "#38BDF8"
+NOTION_CON_ACH_FACE = "#F9FAFB"
+NOTION_CON_ACH_EDGE = "#9CA3AF"
+NOTION_CON_MUS_FACE = "#FEF2F2"
+NOTION_CON_MUS_EDGE = "#F87171"
+
+TEXT_COLOR_EXO = "#0369A1"  # Ocean blue text
+TEXT_COLOR_ACH = "#374151"  # Charcoal text for passive elements
+TEXT_COLOR_MUS = "#991B1B"  # Muted red text for active muscles
 
 
 def find_zero_crossings(y):
@@ -107,8 +114,9 @@ def main():
     plt.subplots_adjust(top=0.90, bottom=0.18, left=0.08, right=0.92, hspace=0.42)
 
     # Precompute cost improvement (negative Watts change down from the highest observed cost)
+    # Using 'mechanical_power' where Achilles is extracted and treated as metabolically free (0 cost)
     bio_costs = df_trial['net_bio_cost_w'].values
-    mech_powers = df_trial['mechanical_power_no_achilles'].values
+    mech_powers = df_trial['mechanical_power'].values
     times_min = df_trial['window_start_s'].values / 60.0
 
     bio_improvement = bio_costs - np.max(bio_costs)
@@ -122,11 +130,11 @@ def main():
     ax_top.grid(axis='y', color='#EDEDED', linestyle='-', linewidth=0.7)
     ax_top.set_axisbelow(True)
 
-    # Edward Tufte style curves (minimalist, low ink, clear visual priority)
-    ax_top.plot(times_min, bio_improvement, color=NOTION_TEXT, linestyle='-', linewidth=1.5, 
-                label="Metabolic Improvement", marker='o', markersize=4)
+    # Edward Tufte style curves (minimalist, low ink, matching theme colors)
+    ax_top.plot(times_min, bio_improvement, color="#DC2626", linestyle='-', linewidth=1.5, 
+                label="Metabolic Improvement (Active)", marker='o', markersize=4)
     ax_top.plot(times_min, mech_improvement, color=NOTION_SUBTEXT, linestyle='--', linewidth=1.2, 
-                label="Mechanical Improvement", marker='s', markersize=4)
+                label="Mechanical Improvement (Total)", marker='s', markersize=4)
     
     ax_top.set_ylabel("Improvement (W)", fontsize=9, fontweight='bold', color=NOTION_TEXT)
     ax_top.set_xlabel("Trial Time (minutes)", fontsize=8, color=NOTION_SUBTEXT)
@@ -188,50 +196,56 @@ def main():
         con_ach = np.array([row[f'con_ach_w_{i:02d}'] for i in range(100)])
         con_mus = np.array([row[f'con_mus_w_{i:02d}'] for i in range(100)])
 
-        # Consolidate general human biological power parameters (Achilles is kept inside general human power)
+        # Consolidate general human biological power parameters
         ref_hum = ref_mus + ref_ach
         con_hum = con_mus + con_ach
 
         # Positive Fills Stacking Order
         pos_ref_exo = np.maximum(ref_exo, 0)
-        pos_ref_hum = pos_ref_exo + np.maximum(ref_hum, 0)
+        pos_ref_ach = pos_ref_exo + np.maximum(ref_ach, 0)
+        pos_ref_mus = pos_ref_ach + np.maximum(ref_mus, 0)
         
-        pos_con_exo = pos_ref_hum + np.maximum(con_exo, 0)
-        pos_con_hum = pos_con_exo + np.maximum(con_hum, 0)
+        pos_con_exo = pos_ref_mus + np.maximum(con_exo, 0)
+        pos_con_ach = pos_con_exo + np.maximum(con_ach, 0)
+        pos_con_mus = pos_con_ach + np.maximum(con_mus, 0)
 
         # Negative Fills Stacking Order
         neg_ref_exo = np.minimum(ref_exo, 0)
-        neg_ref_hum = neg_ref_exo + np.minimum(ref_hum, 0)
+        neg_ref_ach = neg_ref_exo + np.minimum(ref_ach, 0)
+        neg_ref_mus = neg_ref_ach + np.minimum(ref_mus, 0)
         
-        neg_con_exo = neg_ref_hum + np.minimum(con_exo, 0)
-        neg_con_hum = neg_con_exo + np.minimum(con_hum, 0)
+        neg_con_exo = neg_ref_mus + np.minimum(con_exo, 0)
+        neg_con_ach = neg_con_exo + np.minimum(con_ach, 0)
+        neg_con_mus = neg_con_ach + np.minimum(con_mus, 0)
 
-        # Plot Stance Leg Solid Fills
+        # Plot Stance Leg Solid Fills (Passive Achilles gray, Active Muscle red)
         ax.fill_between(stride_pct, z, pos_ref_exo, color=NOTION_REF_EXO, alpha=0.9, linewidth=0, label="Stance Leg Exo")
-        ax.fill_between(stride_pct, pos_ref_exo, pos_ref_hum, color=NOTION_REF_MUS, alpha=0.9, linewidth=0, label="Stance Leg Human")
+        ax.fill_between(stride_pct, pos_ref_exo, pos_ref_ach, color=NOTION_REF_ACH, alpha=0.9, linewidth=0, label="Stance Leg Achilles (Passive)")
+        ax.fill_between(stride_pct, pos_ref_ach, pos_ref_mus, color=NOTION_REF_MUS, alpha=0.9, linewidth=0, label="Stance Leg Muscle (Active)")
 
-        # Plot Swing Leg Extremely Light Solid Fills (Subtle bounds, outline only)
-        ax.fill_between(stride_pct, pos_ref_hum, pos_con_exo, facecolor=NOTION_CON_EXO_FACE, edgecolor=NOTION_CON_EXO_EDGE, linewidth=0.5, label="Swing Leg Exo")
-        ax.fill_between(stride_pct, pos_con_exo, pos_con_hum, facecolor=NOTION_CON_MUS_FACE, edgecolor=NOTION_CON_MUS_EDGE, linewidth=0.5, label="Swing Leg Human")
+        # Plot Swing Leg Extremely Light Solid Fills (Subtle colored edges)
+        ax.fill_between(stride_pct, pos_ref_mus, pos_con_exo, facecolor=NOTION_CON_EXO_FACE, edgecolor=NOTION_CON_EXO_EDGE, linewidth=0.5, label="Swing Leg Exo")
+        ax.fill_between(stride_pct, pos_con_exo, pos_con_ach, facecolor=NOTION_CON_ACH_FACE, edgecolor=NOTION_CON_ACH_EDGE, linewidth=0.5, label="Swing Leg Achilles (Passive)")
+        ax.fill_between(stride_pct, pos_con_ach, pos_con_mus, facecolor=NOTION_CON_MUS_FACE, edgecolor=NOTION_CON_MUS_EDGE, linewidth=0.5, label="Swing Leg Muscle (Active)")
 
         # Plot Negative Solid Fills
         ax.fill_between(stride_pct, z, neg_ref_exo, color=NOTION_REF_EXO, alpha=0.9, linewidth=0)
-        ax.fill_between(stride_pct, neg_ref_exo, neg_ref_hum, color=NOTION_REF_MUS, alpha=0.9, linewidth=0)
+        ax.fill_between(stride_pct, neg_ref_exo, neg_ref_ach, color=NOTION_REF_ACH, alpha=0.9, linewidth=0)
+        ax.fill_between(stride_pct, neg_ref_ach, neg_ref_mus, color=NOTION_REF_MUS, alpha=0.9, linewidth=0)
 
         # Plot Negative Extremely Light Solid Fills
-        ax.fill_between(stride_pct, neg_ref_hum, neg_con_exo, facecolor=NOTION_CON_EXO_FACE, edgecolor=NOTION_CON_EXO_EDGE, linewidth=0.5)
-        ax.fill_between(stride_pct, neg_con_exo, neg_con_hum, facecolor=NOTION_CON_MUS_FACE, edgecolor=NOTION_CON_MUS_EDGE, linewidth=0.5)
+        ax.fill_between(stride_pct, neg_ref_mus, neg_con_exo, facecolor=NOTION_CON_EXO_FACE, edgecolor=NOTION_CON_EXO_EDGE, linewidth=0.5)
+        ax.fill_between(stride_pct, neg_con_exo, neg_con_ach, facecolor=NOTION_CON_ACH_FACE, edgecolor=NOTION_CON_ACH_EDGE, linewidth=0.5)
+        ax.fill_between(stride_pct, neg_con_ach, neg_con_mus, facecolor=NOTION_CON_MUS_FACE, edgecolor=NOTION_CON_MUS_EDGE, linewidth=0.5)
 
         # Draw centered bump work labels (Joules)
         dt = row['mean_stride_duration_s'] / 100.0
-        TEXT_COLOR_EXO = "#3A637A"
-        TEXT_COLOR_HUM = "#7A583A"
         stroke = [pe.withStroke(linewidth=3, foreground=NOTION_BG, alpha=0.8)]
 
-        def label_blocks(sys_curve, exo_curve, hum_curve,
-                         pos_exo_base, pos_hum_base,
-                         neg_exo_base, neg_hum_base,
-                         t_color_exo, t_color_hum):
+        def label_blocks(sys_curve, exo_curve, ach_curve, mus_curve,
+                         pos_exo_base, pos_ach_base, pos_mus_base,
+                         neg_exo_base, neg_ach_base, neg_mus_base,
+                         t_color_exo, t_color_ach, t_color_mus):
             
             crossings = find_zero_crossings(sys_curve)
             boundaries = [0] + [c + 1 for c in crossings] + [len(sys_curve)]
@@ -243,37 +257,43 @@ def main():
                 
                 # Integrate curves over the current cycle segment
                 exo_j = np.trapz(exo_curve[start:end], dx=dt)
-                hum_j = np.trapz(hum_curve[start:end], dx=dt)
+                ach_j = np.trapz(ach_curve[start:end], dx=dt)
+                mus_j = np.trapz(mus_curve[start:end], dx=dt)
                 
                 # Align coordinate positions to peak segment dynamics
                 peak_idx = start + np.argmax(np.abs(sys_curve[start:end]))
                 cx = stride_pct[peak_idx]
                 
                 p_e = exo_curve[peak_idx]
-                p_h = hum_curve[peak_idx]
+                p_a = ach_curve[peak_idx]
+                p_m = mus_curve[peak_idx]
                 
                 y_exo = pos_exo_base[peak_idx] + p_e/2 if p_e > 0 else neg_exo_base[peak_idx] + p_e/2
-                y_hum = pos_hum_base[peak_idx] + p_h/2 if p_h > 0 else neg_hum_base[peak_idx] + p_h/2
+                y_ach = pos_ach_base[peak_idx] + p_a/2 if p_a > 0 else neg_ach_base[peak_idx] + p_a/2
+                y_mus = pos_mus_base[peak_idx] + p_m/2 if p_m > 0 else neg_mus_base[peak_idx] + p_m/2
                 
                 if abs(exo_j) >= 0.5 and abs(p_e) >= 4.0:
                     ax.text(cx, y_exo, f"{exo_j:+.1f} J", color=t_color_exo, fontsize=8, fontweight='bold', ha='center', va='center', path_effects=stroke, zorder=15)
                 
-                if abs(hum_j) >= 0.5 and abs(p_h) >= 4.0:
-                    ax.text(cx, y_hum, f"{hum_j:+.1f} J", color=t_color_hum, fontsize=8, fontweight='bold', ha='center', va='center', path_effects=stroke, zorder=15)
+                if abs(ach_j) >= 0.5 and abs(p_a) >= 4.0:
+                    ax.text(cx, y_ach, f"{ach_j:+.1f} J", color=t_color_ach, fontsize=8, fontweight='bold', ha='center', va='center', path_effects=stroke, zorder=15)
+                
+                if abs(mus_j) >= 0.5 and abs(p_m) >= 4.0:
+                    ax.text(cx, y_mus, f"{mus_j:+.1f} J", color=t_color_mus, fontsize=8, fontweight='bold', ha='center', va='center', path_effects=stroke, zorder=15)
 
         # Stance (Reference) Leg Bump Labels
         ref_sys = ref_exo + ref_hum
-        label_blocks(ref_sys, ref_exo, ref_hum,
-                     pos_exo_base=z, pos_hum_base=pos_ref_exo,
-                     neg_exo_base=z, neg_hum_base=neg_ref_exo,
-                     t_color_exo=TEXT_COLOR_EXO, t_color_hum=TEXT_COLOR_HUM)
+        label_blocks(ref_sys, ref_exo, ref_ach, ref_mus,
+                     pos_exo_base=z, pos_ach_base=pos_ref_exo, pos_mus_base=pos_ref_ach,
+                     neg_exo_base=z, neg_ach_base=neg_ref_exo, neg_mus_base=neg_ref_ach,
+                     t_color_exo=TEXT_COLOR_EXO, t_color_ach=TEXT_COLOR_ACH, t_color_mus=TEXT_COLOR_MUS)
 
         # Swing (Contralateral) Leg Bump Labels
         con_sys = con_exo + con_hum
-        label_blocks(con_sys, con_exo, con_hum,
-                     pos_exo_base=pos_ref_hum, pos_hum_base=pos_con_exo,
-                     neg_exo_base=neg_ref_hum, neg_hum_base=neg_con_exo,
-                     t_color_exo=TEXT_COLOR_EXO, t_color_hum=TEXT_COLOR_HUM)
+        label_blocks(con_sys, con_exo, con_ach, con_mus,
+                     pos_exo_base=pos_ref_mus, pos_ach_base=pos_con_exo, pos_mus_base=pos_con_ach,
+                     neg_exo_base=neg_ref_mus, neg_ach_base=neg_con_exo, neg_mus_base=neg_con_ach,
+                     t_color_exo=TEXT_COLOR_EXO, t_color_ach=TEXT_COLOR_ACH, t_color_mus=TEXT_COLOR_MUS)
 
         # Layout styling
         ax.set_ylim(y_lower, y_upper)
@@ -315,15 +335,19 @@ def main():
         ax.set_ylabel("Mechanical Power (W)", fontsize=11, fontweight='bold', color=NOTION_TEXT)
         ax.text(0.5, -0.3, "Full Stride Cycle (%)", transform=ax.transAxes, ha='center', va='top', color=NOTION_SUBTEXT, fontsize=10, fontweight='bold')
 
-        # Static legends placement (Adjusted to 2 columns given the reduced category counts)
+        # Static legends placement
         handles, labels = ax.get_legend_handles_labels()
-        ax.legend(handles[::-1], labels[::-1], frameon=False, loc="upper left", fontsize=9, labelcolor=NOTION_TEXT, ncol=2)
+        unique_labels, unique_handles = [], []
+        for h, l in zip(handles, labels):
+            if l not in unique_labels:
+                unique_labels.append(l)
+                unique_handles.append(h)
+        ax.legend(unique_handles[::-1], unique_labels[::-1], frameon=False, loc="upper left", fontsize=9, labelcolor=NOTION_TEXT, ncol=3)
 
         # Big Chronological Indicator in Top Title
         fig.suptitle(f"Chronological Gait Adaptation: Day 5", fontsize=15, fontweight='bold', color=NOTION_TEXT, y=0.96)
 
     # 5. Build and Save/Show Animation
-    # Set interval to 2000ms (2 seconds per 5-minute chunk) to allow observation of shifts
     ani = animation.FuncAnimation(fig, update, frames=num_frames, interval=2000, repeat=True)
 
     if args.save:
