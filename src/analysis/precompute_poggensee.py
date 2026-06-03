@@ -415,6 +415,12 @@ def compile_clean_window_row(
         + (4 * j_pos_con_raw + 1 * j_neg_con_raw)
     ) / mean_stride_dur
 
+    # Integrate Achilles components
+    j_pos_ref_ach = np.trapz(np.maximum(ref_ach_mean, 0), dx=dt_stride)
+    j_neg_ref_ach = abs(np.trapz(np.minimum(ref_ach_mean, 0), dx=dt_stride))
+    j_pos_con_ach = np.trapz(np.maximum(con_ach_mean, 0), dx=dt_stride)
+    j_neg_con_ach = abs(np.trapz(np.minimum(con_ach_mean, 0), dx=dt_stride))
+
     exo_power_net = (
         np.trapz(ref_exo_mean, dx=dt_stride) + np.trapz(con_exo_mean, dx=dt_stride)
     ) / mean_stride_dur
@@ -477,6 +483,14 @@ def compile_clean_window_row(
         "mechanical_power_no_achilles_std": mech_power_no_ach_std,
         "exo_power": exo_power_net,
         "exo_power_std": text_exo_power_std,
+        "ref_mus_pos_power_w": j_pos_ref / mean_stride_dur,
+        "ref_mus_neg_power_w": j_neg_ref / mean_stride_dur,
+        "con_mus_pos_power_w": j_pos_con / mean_stride_dur,
+        "con_mus_neg_power_w": j_neg_con / mean_stride_dur,
+        "ref_ach_pos_power_w": j_pos_ref_ach / mean_stride_dur,
+        "ref_ach_neg_power_w": j_neg_ref_ach / mean_stride_dur,
+        "con_ach_pos_power_w": j_pos_con_ach / mean_stride_dur,
+        "con_ach_neg_power_w": j_neg_con_ach / mean_stride_dur,
     }
 
     for i in range(100):

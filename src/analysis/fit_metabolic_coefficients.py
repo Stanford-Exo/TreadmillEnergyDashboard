@@ -36,7 +36,7 @@ NOTION_GRID = "#EDEDED"
 def compile_regression_deltas(df):
     """
     Groups data by trial, filters outliers, and calculates deltas of each component
-    relative to the window containing the maximum metabolic cost.
+    relative to the trial maximums, matching correlate_metabolics.py.
     """
     print(f"\n[DEBUG] Starting compilation. DataFrame shape: {df.shape}")
     if df.empty:
@@ -71,10 +71,7 @@ def compile_regression_deltas(df):
 
         # 2. Filter: Raw metabolic bounds [50.0, 600.0]
         n_pre_bounds = len(group)
-        metabolic_values = group["net_bio_cost_w"].values
-        in_bounds_mask = (metabolic_values >= 50.0) & (metabolic_values <= 600.0)
-
-        group_filtered = group[in_bounds_mask].reset_index(drop=True)
+        group_filtered = group[(group["net_bio_cost_w"] >= 50.0) & (group["net_bio_cost_w"] <= 600.0)].reset_index(drop=True)
         n_removed_bounds = n_pre_bounds - len(group_filtered)
         stats["windows_removed_by_metabolic_bounds"] += n_removed_bounds
 
@@ -102,16 +99,12 @@ def compile_regression_deltas(df):
         group = group_filtered
         stats["valid_trials_compiled"] += 1
 
-        # Identify reference window (maximum metabolic cost)
-        ref_idx = group["net_bio_cost_w"].idxmax()
-        ref_row = group.loc[ref_idx]
-
-        # Calculate bilaterally combined baseline terms
-        ref_pos_mus = ref_row["ref_mus_pos_power_w"] + ref_row["con_mus_pos_power_w"]
-        ref_neg_mus = ref_row["ref_mus_neg_power_w"] + ref_row["con_mus_neg_power_w"]
-        ref_pos_ach = ref_row["ref_ach_pos_power_w"] + ref_row["con_ach_pos_power_w"]
-        ref_neg_ach = ref_row["ref_ach_neg_power_w"] + ref_row["con_ach_neg_power_w"]
-        ref_bio = ref_row["net_bio_cost_w"]
+        # 4. Determine maximum value of each component independently (prevents referencing a single index)
+        max_bio = group["net_bio_cost_w"].max()
+        max_pos_mus = (group["ref_mus_pos_power_w"] + group["con_mus_pos_power_w"]).max()
+        max_neg_mus = (group["ref_mus_neg_power_w"] + group["con_mus_neg_power_w"]).max()
+        max_pos_ach = (group["ref_ach_pos_power_w"] + group["con_ach_pos_power_w"]).max()
+        max_neg_ach = (group["ref_ach_neg_power_w"] + group["con_ach_neg_power_w"]).max()
 
         for idx, row in group.iterrows():
             pos_mus = row["ref_mus_pos_power_w"] + row["con_mus_pos_power_w"]
@@ -124,11 +117,11 @@ def compile_regression_deltas(df):
                 {
                     "trial_name": trial_name,
                     "window_start_s": row["window_start_s"],
-                    "delta_bio_w": row["net_bio_cost_w"] - ref_bio,
-                    "delta_pos_mus_w": pos_mus - ref_pos_mus,
-                    "delta_neg_mus_w": neg_mus - ref_neg_mus,
-                    "delta_pos_ach_w": pos_ach - ref_pos_ach,
-                    "delta_neg_ach_w": neg_ach - ref_neg_ach,
+                    "delta_bio_w": row["net_bio_cost_w"] - max_bio,
+                    "delta_pos_mus_w": pos_mus - max_pos_mus,
+                    "delta_neg_mus_w": neg_mus - max_neg_mus,
+                    "delta_pos_ach_w": pos_ach - max_pos_ach,
+                    "delta_neg_ach_w": neg_ach - max_neg_ach,
                     # Keep raw values to compute raw predictions during plotting
                     "raw_pos_mus_w": pos_mus,
                     "raw_neg_mus_w": neg_mus,
@@ -153,7 +146,6 @@ def fit_coefficients(df_deltas):
         "delta_pos_mus_w",
         "delta_neg_mus_w",
         "delta_pos_ach_w",
-        "delta_neg_ach_w",
     ]
     X = df_deltas[features].values
     y = df_deltas["delta_bio_w"].values
@@ -238,7 +230,6 @@ def plot_fitting_results(df_deltas, results):
             results["coefficients"][0] * sub_df["raw_pos_mus_w"].values
             + results["coefficients"][1] * sub_df["raw_neg_mus_w"].values
             + results["coefficients"][2] * sub_df["raw_pos_ach_w"].values
-            + results["coefficients"][3] * sub_df["raw_neg_ach_w"].values
         )
 
         # 3. Predicted delta (predicted change relative to the maximum predicted rate)
@@ -306,16 +297,15 @@ def plot_fitting_results(df_deltas, results):
     labels = [
         "Positive Muscle\n(c_pos_mus)",
         "Negative Muscle\n(c_neg_mus)",
-        "Positive Achilles\n(c_pos_ach)",
-        "Negative Achilles\n(c_neg_ach)",
+        "Achilles Elastic\n(c_ach)",
     ]
 
     coeffs = results["coefficients"]
     errors = results["standard_errors"]
     p_vals = results["p_values"]
 
-    bar_colors = ["#FCA5A5", "#FCA5A5", "#D1D5DB", "#D1D5DB"]
-    edge_colors = ["#DC2626", "#DC2626", "#4B5563", "#4B5563"]
+    bar_colors = ["#FCA5A5", "#FCA5A5", "#D1D5DB"]
+    edge_colors = ["#DC2626", "#DC2626", "#4B5563"]
 
     bars = ax2.bar(
         labels,
@@ -329,7 +319,7 @@ def plot_fitting_results(df_deltas, results):
     )
 
     # Superimpose standard 4:1 guideline references
-    literature_defaults = [4.0, 1.0, 0.0, 0.0]
+    literature_defaults = [4.0, 1.0, 0.0]
     for idx, baseline in enumerate(literature_defaults):
         ax2.hlines(
             baseline,

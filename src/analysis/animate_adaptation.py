@@ -84,51 +84,11 @@ def format_time(seconds):
     return f"{mins:02d}:{secs:02d}"
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Animate adaptation changes over time from precomputed gait cycles."
-    )
-    parser.add_argument(
-        "--file",
-        type=str,
-        default=DEFAULT_PARQUET_PATH,
-        help="Path to the precomputed parquet database.",
-    )
-    parser.add_argument(
-        "--trial",
-        type=str,
-        default="Continued_Optimization_1_adaptation_Day2_ADAPT1",
-        help="Exact trial name to filter.",
-    )
-    parser.add_argument(
-        "--save",
-        action="store_true",
-        help="Save the output as a GIF instead of showing it interactively.",
-    )
-    args = parser.parse_args()
-
-    parquet_path = os.path.abspath(args.file)
-    if not os.path.exists(parquet_path):
-        print(f"Error: Could not find precomputed parquet file at: {parquet_path}")
-        print("Please run 'python src/analysis/precompute_poggensee.py' first.")
-        sys.exit(1)
-
-    df_all = pd.read_parquet(parquet_path)
-
-    # 1. Filter and isolate target adaptation trial
-    df_trial = df_all[df_all["trial_name"] == args.trial].copy()
-    if df_trial.empty:
-        print(f"Error: Trial '{args.trial}' not found in the dataset.")
-        available = df_all["trial_name"].unique()
-        print("\nAvailable trial names in this file:")
-        for name in sorted(available):
-            print(f"  - {name}")
-        sys.exit(1)
-
+def animate_trial(trial_name, df_trial, save, output_dir):
     # Sort sequentially by window start time
     df_trial = df_trial.sort_values(by="window_start_s").reset_index(drop=True)
     num_frames = len(df_trial)
-    print(f"Loaded trial: '{args.trial}' with {num_frames} chronological windows.")
+    print(f"\nProcessing trial: '{trial_name}' with {num_frames} chronological windows.")
 
     # 2. Setup Figure with Edward Tufte timeline plot on top and stride profiles below
     fig, (ax_top, ax) = plt.subplots(
@@ -143,13 +103,21 @@ def main():
     plt.subplots_adjust(top=0.90, bottom=0.18, left=0.08, right=0.92, hspace=0.42)
 
     # Precompute cost improvement (negative Watts change down from the highest observed cost)
-    # Using 'mechanical_power' where Achilles is extracted and treated as metabolically free (0 cost)
     bio_costs = df_trial["net_bio_cost_w"].values
     mech_powers = df_trial["mechanical_power"].values
     times_min = df_trial["window_start_s"].values / 60.0
 
     bio_improvement = bio_costs - np.max(bio_costs)
     mech_improvement = mech_powers - np.max(mech_powers)
+
+    # Use the 3-parameter empirical regression coefficients to estimate metabolics:
+    # c_pos_mus = 3.97, c_neg_mus = 1.31, c_ach = 1.70
+    pos_mus = df_trial["ref_mus_pos_power_w"].values + df_trial["con_mus_pos_power_w"].values
+    neg_mus = df_trial["ref_mus_neg_power_w"].values + df_trial["con_mus_neg_power_w"].values
+    pos_ach = df_trial["ref_ach_pos_power_w"].values + df_trial["con_ach_pos_power_w"].values
+
+    predicted_metabolics = 3.97 * pos_mus + 1.31 * neg_mus + 1.70 * pos_ach
+    predicted_improvement = predicted_metabolics - np.max(predicted_metabolics)
 
     # Style and plot components of the top timeline axes in Edward Tufte style
     for spine in ["top", "right", "left"]:
@@ -166,8 +134,18 @@ def main():
         color="#DC2626",
         linestyle="-",
         linewidth=1.5,
-        label="Metabolic Improvement (Active)",
+        label="Measured Metabolic Improvement",
         marker="o",
+        markersize=4,
+    )
+    ax_top.plot(
+        times_min,
+        predicted_improvement,
+        color="#8B5CF6",
+        linestyle="-.",
+        linewidth=1.5,
+        label="Predicted Metabolic Improvement (Fitted)",
+        marker="^",
         markersize=4,
     )
     ax_top.plot(
@@ -688,10 +666,23 @@ def main():
             ncol=3,
         )
 
+        # Real-time metabolic cost estimates text box
+        current_bio = row["net_bio_cost_w"]
+        current_pred = predicted_metabolics[frame_idx]
+        stats_text = (
+            f"Measured Net Metabolic Cost: {current_bio:.1f} W\n"
+            f"Predicted Net Metabolic Cost : {current_pred:.1f} W"
+        )
+        ax.text(
+            0.98, 0.95, stats_text, transform=ax.transAxes,
+            fontsize=10, va='top', ha='right', color=NOTION_TEXT, fontweight='bold',
+            bbox=dict(boxstyle='round,pad=0.5', facecolor=NOTION_BG, edgecolor='#EDEDED', alpha=0.9)
+        )
+
         # Big Chronological Indicator in Top Title
         fig.suptitle(
-            f"Chronological Gait Adaptation: Day 3",
-            fontsize=15,
+            f"Chronological Gait Adaptation: {trial_name}",
+            fontsize=13,
             fontweight="bold",
             color=NOTION_TEXT,
             y=0.96,
@@ -702,8 +693,8 @@ def main():
         fig, update, frames=num_frames, interval=2000, repeat=True
     )
 
-    if args.save:
-        gif_path = os.path.join(POGGENSEE_DIR, f"{args.trial}_adaptation.gif")
+    if save:
+        gif_path = os.path.join(output_dir, f"{trial_name}_adaptation.gif")
         print(f"Saving animation to {gif_path}...")
         try:
             # Pillow is a default writer that doesn't require ffmpeg
@@ -711,9 +702,71 @@ def main():
             print("Successfully saved!")
         except Exception as e:
             print(f"Failed to save GIF: {e}")
+        finally:
+            plt.close(fig)
     else:
         print("Rendering interactive window. Close the plot to finish.")
         plt.show()
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Animate adaptation changes over time from precomputed gait cycles."
+    )
+    parser.add_argument(
+        "--file",
+        type=str,
+        default=DEFAULT_PARQUET_PATH,
+        help="Path to the precomputed parquet database.",
+    )
+    parser.add_argument(
+        "--trial",
+        type=str,
+        default=None,
+        help="Exact trial name to filter. If not specified, all valid trials will be run.",
+    )
+    parser.add_argument(
+        "--save",
+        action="store_true",
+        help="Save the output as a GIF instead of showing it interactively.",
+    )
+    args = parser.parse_args()
+
+    parquet_path = os.path.abspath(args.file)
+    if not os.path.exists(parquet_path):
+        print(f"Error: Could not find precomputed parquet file at: {parquet_path}")
+        print("Please run 'python src/analysis/precompute_poggensee.py' first.")
+        sys.exit(1)
+
+    df_all = pd.read_parquet(parquet_path)
+
+    # Identify valid target adaptation trials (more than 1 chronological segment)
+    valid_trials = []
+    for name, group in df_all.groupby("trial_name"):
+        if len(group) > 1:
+            valid_trials.append((name, group))
+
+    if not valid_trials:
+        print("Error: No precomputed trials contain more than 1 segment. Check the parquet file content.")
+        sys.exit(1)
+
+    # Mode 1: Individual Trial processing
+    if args.trial:
+        df_trial = df_all[df_all["trial_name"] == args.trial].copy()
+        if df_trial.empty:
+            print(f"Error: Trial '{args.trial}' not found in the dataset.")
+            available = df_all["trial_name"].unique()
+            print("\nAvailable trial names in this file:")
+            for name in sorted(available):
+                print(f"  - {name}")
+            sys.exit(1)
+        animate_trial(args.trial, df_trial, args.save, POGGENSEE_DIR)
+
+    # Mode 2: Batch processing (all valid trials sequentially)
+    else:
+        print(f"Batch Processing: Discovered {len(valid_trials)} valid trials with > 1 segment.")
+        for trial_name, df_trial in sorted(valid_trials):
+            animate_trial(trial_name, df_trial, args.save, POGGENSEE_DIR)
 
 
 if __name__ == "__main__":
