@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(SCRIPT_DIR, "../")))
 try:
     import matplotlib.cm as cm
     import matplotlib.pyplot as plt
+    from matplotlib.patches import Ellipse
 except ImportError:
     plt = None
 
@@ -58,7 +59,6 @@ def compile_regression_deltas(df):
     }
 
     for trial_name, group in df.groupby("trial_name"):
-        n_initial = len(group)
         group = group.sort_values(by="window_start_s").reset_index(drop=True)
 
         # 1. Filter: Exclude cooldown tail transients
@@ -71,7 +71,9 @@ def compile_regression_deltas(df):
 
         # 2. Filter: Raw metabolic bounds [50.0, 600.0]
         n_pre_bounds = len(group)
-        group_filtered = group[(group["net_bio_cost_w"] >= 50.0) & (group["net_bio_cost_w"] <= 600.0)].reset_index(drop=True)
+        group_filtered = group[
+            (group["net_bio_cost_w"] >= 50.0) & (group["net_bio_cost_w"] <= 600.0)
+        ].reset_index(drop=True)
         n_removed_bounds = n_pre_bounds - len(group_filtered)
         stats["windows_removed_by_metabolic_bounds"] += n_removed_bounds
 
@@ -102,21 +104,51 @@ def compile_regression_deltas(df):
         # 4. Determine maximum value of each component independently (prevents referencing a single index)
         max_bio_idx = group["net_bio_cost_w"].idxmax()
         max_bio = group.loc[max_bio_idx, "net_bio_cost_w"]
-        max_bio_std = group.loc[max_bio_idx, "net_bio_cost_std_w"] if "net_bio_cost_std_w" in group.columns else 0.0
+        max_bio_std = (
+            group.loc[max_bio_idx, "net_bio_cost_std_w"]
+            if "net_bio_cost_std_w" in group.columns
+            else 0.0
+        )
 
-        max_pos_mus = (group["ref_mus_pos_power_w"] + group["con_mus_pos_power_w"]).max()
-        max_neg_mus = (group["ref_mus_neg_power_w"] + group["con_mus_neg_power_w"]).max()
-        max_pos_ach = (group["ref_ach_pos_power_w"] + group["con_ach_pos_power_w"]).max()
-        max_neg_ach = (group["ref_ach_neg_power_w"] + group["con_ach_neg_power_w"]).max()
+        max_mech_idx = group["mechanical_power"].idxmax()
+        max_mech_std = (
+            group.loc[max_mech_idx, "mechanical_power_std"]
+            if "mechanical_power_std" in group.columns
+            else 0.0
+        )
+
+        max_pos_mus = (
+            group["ref_mus_pos_power_w"] + group["con_mus_pos_power_w"]
+        ).max()
+        max_neg_mus = (
+            group["ref_mus_neg_power_w"] + group["con_mus_neg_power_w"]
+        ).max()
+        max_pos_ach = (
+            group["ref_ach_pos_power_w"] + group["con_ach_pos_power_w"]
+        ).max()
 
         for idx, row in group.iterrows():
             pos_mus = row["ref_mus_pos_power_w"] + row["con_mus_pos_power_w"]
             neg_mus = row["ref_mus_neg_power_w"] + row["con_mus_neg_power_w"]
             pos_ach = row["ref_ach_pos_power_w"] + row["con_ach_pos_power_w"]
-            neg_ach = row["ref_ach_neg_power_w"] + row["con_ach_neg_power_w"]
 
-            curr_bio_std = row["net_bio_cost_std_w"] if "net_bio_cost_std_w" in row else 5.0
-            delta_bio_std = np.sqrt(curr_bio_std**2 + max_bio_std**2) if max_bio_std > 0 else curr_bio_std
+            curr_bio_std = (
+                row["net_bio_cost_std_w"] if "net_bio_cost_std_w" in row else 5.0
+            )
+            delta_bio_std = (
+                np.sqrt(curr_bio_std**2 + max_bio_std**2)
+                if max_bio_std > 0
+                else curr_bio_std
+            )
+
+            curr_mech_std = (
+                row["mechanical_power_std"] if "mechanical_power_std" in row else 0.0
+            )
+            delta_mech_std = (
+                np.sqrt(curr_mech_std**2 + max_mech_std**2)
+                if max_mech_std > 0
+                else curr_mech_std
+            )
 
             # Compute deltas relative to baseline peak window
             delta_rows.append(
@@ -125,15 +157,17 @@ def compile_regression_deltas(df):
                     "window_start_s": row["window_start_s"],
                     "delta_bio_w": row["net_bio_cost_w"] - max_bio,
                     "delta_bio_std_w": delta_bio_std,
+                    "delta_mech_std_w": delta_mech_std,
+                    "num_valid_strides": row["num_valid_strides"]
+                    if "num_valid_strides" in row
+                    else 250,
                     "delta_pos_mus_w": pos_mus - max_pos_mus,
                     "delta_neg_mus_w": neg_mus - max_neg_mus,
                     "delta_pos_ach_w": pos_ach - max_pos_ach,
-                    "delta_neg_ach_w": neg_ach - max_neg_ach,
                     # Keep raw values to compute raw predictions during plotting
                     "raw_pos_mus_w": pos_mus,
                     "raw_neg_mus_w": neg_mus,
                     "raw_pos_ach_w": pos_ach,
-                    "raw_neg_ach_w": neg_ach,
                 }
             )
 
@@ -160,7 +194,7 @@ def fit_coefficients(df_deltas, use_wls=True):
     if use_wls and "delta_bio_std_w" in df_deltas.columns:
         # Enforce minimum uncertainty bounds to avoid division by zero
         stds = np.maximum(df_deltas["delta_bio_std_w"].values, 1.0)
-        weights = 1.0 / (stds ** 2)
+        weights = 1.0 / (stds**2)
 
         # Scale weights to average 1.0 for unbiased residual estimation
         weights = weights / np.mean(weights)
@@ -228,7 +262,9 @@ def plot_fitting_results(df_deltas, results):
         for spine in ["bottom", "left"]:
             ax.spines[spine].set_color(NOTION_TEXT)
         ax.tick_params(axis="both", colors=NOTION_TEXT, length=4, labelsize=9)
-        ax.grid(color=NOTION_GRID, linestyle="-", linewidth=1.0)
+        ax.grid(
+            color="#F1F5F9", linestyle="-", linewidth=0.5
+        )  # Muted, light Tufte grid
         ax.set_axisbelow(True)
 
     # ---------------------------------------------------------
@@ -243,32 +279,67 @@ def plot_fitting_results(df_deltas, results):
     for i, trial_name in enumerate(unique_trials):
         sub_df = df_deltas[df_deltas["trial_name"] == trial_name].copy()
 
-        # 1. Actual delta (metabolic change relative to its maximum observed rate)
         actual_delta = sub_df["delta_bio_w"].values
 
-        # 2. Raw predictions for each window using the fitted coefficients
         raw_pred = (
             results["coefficients"][0] * sub_df["raw_pos_mus_w"].values
             + results["coefficients"][1] * sub_df["raw_neg_mus_w"].values
             + results["coefficients"][2] * sub_df["raw_pos_ach_w"].values
         )
 
-        # 3. Predicted delta (predicted change relative to the maximum predicted rate)
         pred_delta = raw_pred - np.max(raw_pred)
 
         all_actual_deltas.extend(actual_delta)
         all_pred_deltas.extend(pred_delta)
 
+        # Plot centers (slightly smaller, crisp white border)
         ax1.scatter(
             pred_delta,
             actual_delta,
             color=colormap(i),
-            s=50,
-            alpha=0.75,
+            s=30,
+            alpha=0.90,
             edgecolors="white",
-            linewidths=0.4,
+            linewidths=0.5,
             label=trial_name,
+            zorder=4,
         )
+
+        # Plot uncertainty ellipses scaled down to Standard Error of the Mean (SEM)
+        # Using hollow ellipses (facecolor='none') to eliminate color overlaps/mud
+        for idx, (_, row_val) in enumerate(sub_df.iterrows()):
+            pt_pred_delta = pred_delta[idx]
+            pt_actual_delta = actual_delta[idx]
+
+            y_std = row_val["delta_bio_std_w"] if "delta_bio_std_w" in row_val else 0.0
+            x_std = (
+                row_val["delta_mech_std_w"] if "delta_mech_std_w" in row_val else 0.0
+            )
+
+            n_strides = (
+                row_val["num_valid_strides"] if "num_valid_strides" in row_val else 250
+            )
+            if pd.isna(n_strides) or n_strides <= 0:
+                n_strides = 250
+
+            # Approximately 15 breath-by-breath measurements are collected per 5-minute window
+            n_breaths = 15
+
+            x_sem = x_std / np.sqrt(n_strides)
+            y_sem = y_std / np.sqrt(n_breaths)
+
+            ellipse = Ellipse(
+                xy=(pt_pred_delta, pt_actual_delta),
+                width=2 * x_sem,
+                height=2 * y_sem,
+                angle=0,
+                facecolor="none",  # Hollow faces prevent color mud
+                edgecolor=colormap(i),
+                alpha=0.35,  # Legible outline alpha
+                linewidth=0.6,  # Delicate Tufte line weight
+                zorder=3,
+            )
+            ax1.add_patch(ellipse)
 
     # Reference line of perfect correlation: both drop identically
     min_val = min(np.min(all_actual_deltas), np.min(all_pred_deltas))
@@ -364,6 +435,10 @@ def plot_fitting_results(df_deltas, results):
         pad=10,
     )
 
+    # Apply responsive Y headroom to keep the labels from colliding with the upper frame
+    max_upper_bound = max([coeffs[j] + errors[j] for j in range(len(coeffs))])
+    ax2.set_ylim(0.0, max_upper_bound * 1.35)
+
     for idx, bar in enumerate(bars):
         height = bar.get_height()
         val = coeffs[idx]
@@ -376,11 +451,17 @@ def plot_fitting_results(df_deltas, results):
             else f"{val:+.2f}\n±{err:.2f}\np<0.001"
         )
         va_dir = "bottom" if height >= 0 else "top"
-        offset = 0.15 if height >= 0 else -0.55
+
+        # Position the label text comfortably above the top error bar cap
+        y_pos = (
+            height + errors[idx] + (max_upper_bound * 0.05)
+            if height >= 0
+            else height - errors[idx] - (max_upper_bound * 0.15)
+        )
 
         ax2.text(
             bar.get_x() + bar.get_width() / 2.0,
-            height + offset,
+            y_pos,
             text_str,
             ha="center",
             va=va_dir,

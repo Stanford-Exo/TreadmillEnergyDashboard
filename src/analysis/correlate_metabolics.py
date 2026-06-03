@@ -14,6 +14,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 try:
     import matplotlib.cm as cm
     import matplotlib.pyplot as plt
+    from matplotlib.patches import Ellipse
 except ImportError:
     plt = None
 
@@ -116,6 +117,9 @@ def process_within_trial_changes(df, use_no_achilles=False):
                     "delta_mech_w": delta_mech,
                     "delta_bio_std_w": delta_bio_std,
                     "delta_mech_std_w": delta_mech_std,
+                    "num_valid_strides": row["num_valid_strides"]
+                    if "num_valid_strides" in row
+                    else 250,
                     "raw_bio_w": row["net_bio_cost_w"],
                     "raw_mech_w": row[mech_col],
                 }
@@ -128,6 +132,7 @@ def plot_delta_correlation(df_deltas, use_no_achilles=False):
     """
     Plots the scatter correlation between the change in Estimated Mechanical Power
     and the change in Measured Net Biological Cost relative to trial maximums.
+    Visualizes bivariate standard deviations using semi-transparent 1-sigma uncertainty ellipses.
     Forces the regression line through the origin and frames (0,0) in the upper-right corner.
     """
     fig, ax = plt.subplots(figsize=(10, 7), facecolor=NOTION_BG)
@@ -136,11 +141,11 @@ def plot_delta_correlation(df_deltas, use_no_achilles=False):
     # Title & Subtitle based on the Achilles tendon configuration
     if use_no_achilles:
         title = "Within-Trial Changes: Delta Mechanics (NO Achilles Model) vs. Delta Metabolics"
-        subtitle = "Correlating within-subject changes with standard deviation whiskers (cooldowns & outliers excluded)."
+        subtitle = "Correlating within-subject changes with standard error ellipses (cooldowns & outliers excluded)."
         x_label = "Change in Est. Mechanical Cost ($\Delta$ Mechanical Power) (W)"
     else:
         title = "Within-Trial Changes: Delta Mechanics (Achilles Extracted) vs. Delta Metabolics"
-        subtitle = "Correlating within-subject changes with standard deviation whiskers (cooldowns & outliers excluded)."
+        subtitle = "Correlating within-subject changes with standard error ellipses (cooldowns & outliers excluded)."
         x_label = "Change in Est. Mechanical Muscle Cost ($\Delta$ Muscle Power) (W)"
 
     fig.text(0.05, 0.93, title, fontsize=13, fontweight="bold", color=NOTION_TEXT)
@@ -155,7 +160,7 @@ def plot_delta_correlation(df_deltas, use_no_achilles=False):
         ax.spines[spine].set_color(NOTION_TEXT)
 
     ax.tick_params(axis="both", colors=NOTION_TEXT, length=4)
-    ax.grid(color=NOTION_GRID, linestyle="-", linewidth=1.0)
+    ax.grid(color="#F1F5F9", linestyle="-", linewidth=0.5)  # Muted, delicate gridlines
     ax.set_axisbelow(True)
 
     x_vals = df_deltas["delta_mech_w"].values
@@ -168,28 +173,46 @@ def plot_delta_correlation(df_deltas, use_no_achilles=False):
     for i, trial_name in enumerate(unique_trials):
         sub_df = df_deltas[df_deltas["trial_name"] == trial_name]
 
-        # Use errorbars to plot data points with standard deviation whiskers
-        ax.errorbar(
+        # Plot centers (slightly smaller, white borders)
+        ax.scatter(
             sub_df["delta_mech_w"],
             sub_df["delta_bio_w"],
-            xerr=sub_df["delta_mech_std_w"]
-            if "delta_mech_std_w" in sub_df.columns
-            else None,
-            yerr=sub_df["delta_bio_std_w"]
-            if "delta_bio_std_w" in sub_df.columns
-            else None,
-            fmt="o",
             color=colormap(i),
-            ecolor=colormap(i),
-            elinewidth=0.8,
-            capsize=2,
-            alpha=0.6,
-            markersize=7,
-            markeredgecolor="white",
-            markeredgewidth=0.5,
+            s=30,
+            edgecolors="white",
+            linewidths=0.5,
             label=trial_name,
-            zorder=3,
+            zorder=4,
         )
+
+        # Plot uncertainty ellipses scaled down to Standard Error of the Mean (SEM)
+        # Using hollow ellipses (facecolor='none') to eliminate color overlaps/mud
+        for _, row in sub_df.iterrows():
+            x_val = row["delta_mech_w"]
+            y_val = row["delta_bio_w"]
+            x_std = row["delta_mech_std_w"] if "delta_mech_std_w" in row else 0.0
+            y_std = row["delta_bio_std_w"] if "delta_bio_std_w" in row else 0.0
+
+            n_strides = row["num_valid_strides"] if "num_valid_strides" in row else 250
+            if pd.isna(n_strides) or n_strides <= 0:
+                n_strides = 250
+            n_breaths = 15
+
+            x_sem = x_std / np.sqrt(n_strides)
+            y_sem = y_std / np.sqrt(n_breaths)
+
+            ellipse = Ellipse(
+                xy=(x_val, y_val),
+                width=2 * x_sem,
+                height=2 * y_sem,
+                angle=0,
+                facecolor="none",  # Hollow faces prevent color mud
+                edgecolor=colormap(i),
+                alpha=0.35,  # Legible outline alpha
+                linewidth=0.6,  # Delicate Tufte line weight
+                zorder=3,
+            )
+            ax.add_patch(ellipse)
 
     # Reference cross-hairs at delta origin (0, 0)
     ax.axhline(0, color=NOTION_SUBTEXT, linestyle=":", linewidth=0.8, zorder=1)
