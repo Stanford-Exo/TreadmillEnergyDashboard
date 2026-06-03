@@ -100,7 +100,10 @@ def compile_regression_deltas(df):
         stats["valid_trials_compiled"] += 1
 
         # 4. Determine maximum value of each component independently (prevents referencing a single index)
-        max_bio = group["net_bio_cost_w"].max()
+        max_bio_idx = group["net_bio_cost_w"].idxmax()
+        max_bio = group.loc[max_bio_idx, "net_bio_cost_w"]
+        max_bio_std = group.loc[max_bio_idx, "net_bio_cost_std_w"] if "net_bio_cost_std_w" in group.columns else 0.0
+
         max_pos_mus = (group["ref_mus_pos_power_w"] + group["con_mus_pos_power_w"]).max()
         max_neg_mus = (group["ref_mus_neg_power_w"] + group["con_mus_neg_power_w"]).max()
         max_pos_ach = (group["ref_ach_pos_power_w"] + group["con_ach_pos_power_w"]).max()
@@ -112,12 +115,16 @@ def compile_regression_deltas(df):
             pos_ach = row["ref_ach_pos_power_w"] + row["con_ach_pos_power_w"]
             neg_ach = row["ref_ach_neg_power_w"] + row["con_ach_neg_power_w"]
 
+            curr_bio_std = row["net_bio_cost_std_w"] if "net_bio_cost_std_w" in row else 5.0
+            delta_bio_std = np.sqrt(curr_bio_std**2 + max_bio_std**2) if max_bio_std > 0 else curr_bio_std
+
             # Compute deltas relative to baseline peak window
             delta_rows.append(
                 {
                     "trial_name": trial_name,
                     "window_start_s": row["window_start_s"],
                     "delta_bio_w": row["net_bio_cost_w"] - max_bio,
+                    "delta_bio_std_w": delta_bio_std,
                     "delta_pos_mus_w": pos_mus - max_pos_mus,
                     "delta_neg_mus_w": neg_mus - max_neg_mus,
                     "delta_pos_ach_w": pos_ach - max_pos_ach,
@@ -138,9 +145,9 @@ def compile_regression_deltas(df):
     return pd.DataFrame(delta_rows)
 
 
-def fit_coefficients(df_deltas):
+def fit_coefficients(df_deltas, use_wls=True):
     """
-    Fits standard OLS forced through the origin: y = X * beta
+    Fits standard OLS or Weighted Least Squares (WLS) forced through the origin: y = X * beta
     """
     features = [
         "delta_pos_mus_w",
@@ -150,9 +157,24 @@ def fit_coefficients(df_deltas):
     X = df_deltas[features].values
     y = df_deltas["delta_bio_w"].values
 
-    # OLS through origin: beta = (X^T * X)^-1 * X^T * y
-    XTX = X.T @ X
-    XTy = X.T @ y
+    if use_wls and "delta_bio_std_w" in df_deltas.columns:
+        # Enforce minimum uncertainty bounds to avoid division by zero
+        stds = np.maximum(df_deltas["delta_bio_std_w"].values, 1.0)
+        weights = 1.0 / (stds ** 2)
+
+        # Scale weights to average 1.0 for unbiased residual estimation
+        weights = weights / np.mean(weights)
+
+        # Construct weighted design matrices
+        sqrt_W = np.diag(np.sqrt(weights))
+        X_w = sqrt_W @ X
+        y_w = np.sqrt(weights) * y
+
+        XTX = X_w.T @ X_w
+        XTy = X_w.T @ y_w
+    else:
+        XTX = X.T @ X
+        XTy = X.T @ y
 
     beta = np.linalg.solve(XTX, XTy)
 
@@ -168,7 +190,6 @@ def fit_coefficients(df_deltas):
 
     t_stats = beta / se_beta
     p_values = 2 * (1 - t.cdf(np.abs(t_stats), df=n - p))
-
     r2 = 1.0 - (rss / tss) if tss > 0 else 0.0
 
     results = {
@@ -195,7 +216,7 @@ def plot_fitting_results(df_deltas, results):
     ax2.set_facecolor(NOTION_BG)
 
     title = "Empirical Regression: Fitting Biological and Elastic Cost Coefficients"
-    subtitle = f"Multi-variable OLS forced through the origin | N = {results['n']} windows | Combined R^2 = {results['r2']:.3f}"
+    subtitle = f"Multi-variable Weighted Least Squares forced through the origin | N = {results['n']} windows | Combined R^2 = {results['r2']:.3f}"
 
     fig.text(0.04, 0.94, title, fontsize=15, fontweight="bold", color=NOTION_TEXT)
     fig.text(0.04, 0.90, subtitle, fontsize=10.5, color=NOTION_SUBTEXT)
