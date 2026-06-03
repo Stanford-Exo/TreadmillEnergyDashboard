@@ -304,7 +304,13 @@ def compile_clean_window_row(
     if not vo2_col:
         return None
 
-    vo2_mean = df_win[vo2_col].replace(0, np.nan).dropna().mean()
+    # Calculate row-by-row metabolic cost to compute variance across the window
+    vo2_series = df_win[vo2_col].replace(0, np.nan)
+    vco2_series = df_win[vco2_col].replace(0, np.nan) if vco2_col else 0.85 * vo2_series
+    row_bio_watts = (3.941 * vo2_series + 1.106 * vco2_series) * 4.184 / 60.0
+    row_bio_watts = row_bio_watts.dropna()
+
+    vo2_mean = vo2_series.dropna().mean()
     if pd.isna(vo2_mean) or vo2_mean <= 0:
         return None
 
@@ -315,6 +321,7 @@ def compile_clean_window_row(
     )
     cal_per_min = 3.941 * vo2_mean + 1.106 * vco2_mean
     bio_watts = cal_per_min * 4.184 / 60.0
+    bio_watts_std = float(row_bio_watts.std()) if len(row_bio_watts) > 1 else 0.0
 
     standing_baseline = (
         df_win["qs_baseline_w"].iloc[0] if "qs_baseline_w" in df_win.columns else 70.0
@@ -487,8 +494,10 @@ def compile_clean_window_row(
         "duty_factor_std": duty_factor_std,
         "num_valid_strides": len(window_cycles),
         "bio_watts": bio_watts,
+        "bio_watts_std": bio_watts_std,
         "standing_baseline_w": standing_baseline,
         "net_bio_cost_w": net_bio_watts,
+        "net_bio_cost_std_w": bio_watts_std,
         "mechanical_power": est_mech_watts,
         "mechanical_power_std": mech_power_std,
         "mechanical_power_no_achilles": est_mech_watts_no_achilles,

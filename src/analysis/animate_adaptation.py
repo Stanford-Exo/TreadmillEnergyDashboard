@@ -107,8 +107,20 @@ def animate_trial(trial_name, df_trial, save, output_dir):
     mech_powers = df_trial["mechanical_power"].values
     times_min = df_trial["window_start_s"].values / 60.0
 
+    bio_std = df_trial["net_bio_cost_std_w"].values if "net_bio_cost_std_w" in df_trial.columns else np.zeros(num_frames)
+    mech_std = df_trial["mechanical_power_std"].values if "mechanical_power_std" in df_trial.columns else np.zeros(num_frames)
+
     bio_improvement = bio_costs - np.max(bio_costs)
     mech_improvement = mech_powers - np.max(mech_powers)
+
+    # Propagate error bands relative to maximum points
+    max_bio_idx = np.argmax(bio_costs)
+    max_mech_idx = np.argmax(mech_powers)
+    max_bio_std = bio_std[max_bio_idx] if len(bio_std) > 0 else 0.0
+    max_mech_std = mech_std[max_mech_idx] if len(mech_std) > 0 else 0.0
+
+    delta_bio_std = np.sqrt(bio_std**2 + max_bio_std**2) if len(bio_std) > 0 else np.zeros(num_frames)
+    delta_mech_std = np.sqrt(mech_std**2 + max_mech_std**2) if len(mech_std) > 0 else np.zeros(num_frames)
 
     # Use the 3-parameter empirical regression coefficients to estimate metabolics:
     # c_pos_mus = 3.97, c_neg_mus = 1.31, c_ach = 1.70
@@ -137,7 +149,18 @@ def animate_trial(trial_name, df_trial, save, output_dir):
         label="Measured Metabolic Improvement",
         marker="o",
         markersize=4,
+        zorder=4
     )
+    if len(bio_std) > 0 and np.any(bio_std > 0):
+        ax_top.fill_between(
+            times_min,
+            bio_improvement - delta_bio_std,
+            bio_improvement + delta_bio_std,
+            color="#DC2626",
+            alpha=0.12,
+            zorder=1
+        )
+
     ax_top.plot(
         times_min,
         predicted_improvement,
@@ -147,7 +170,9 @@ def animate_trial(trial_name, df_trial, save, output_dir):
         label="Predicted Metabolic Improvement (Fitted)",
         marker="^",
         markersize=4,
+        zorder=3
     )
+
     ax_top.plot(
         times_min,
         mech_improvement,
@@ -157,7 +182,17 @@ def animate_trial(trial_name, df_trial, save, output_dir):
         label="Mechanical Improvement (Total)",
         marker="s",
         markersize=4,
+        zorder=2
     )
+    if len(mech_std) > 0 and np.any(mech_std > 0):
+        ax_top.fill_between(
+            times_min,
+            mech_improvement - delta_mech_std,
+            mech_improvement + delta_mech_std,
+            color=NOTION_SUBTEXT,
+            alpha=0.10,
+            zorder=1
+        )
 
     ax_top.set_ylabel(
         "Improvement (W)", fontsize=9, fontweight="bold", color=NOTION_TEXT

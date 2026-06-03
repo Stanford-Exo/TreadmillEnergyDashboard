@@ -69,6 +69,10 @@ analyze-poggensee:
 fit-metabolics:
 	PYTHONPATH=src $(PYTHON) -m analysis.fit_metabolic_coefficients
 
+# Run the custom validation scatter plot generator
+plot-validation:
+		PYTHONPATH=src $(PYTHON) -m analysis.plot_tufte_validation
+
 # Run the Python REST/Ingestion backend server
 server:
 	PYTHONPATH=src $(PYTHON) src/server/server.py
