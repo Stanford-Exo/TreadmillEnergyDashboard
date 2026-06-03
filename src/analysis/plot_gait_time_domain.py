@@ -1,4 +1,4 @@
-# File: src/analysis/plot_gait_clean_heuristics.py
+# File: src/analysis/plot_gait_time_domain_metabolics.py
 
 import argparse
 import os
@@ -19,7 +19,7 @@ except ImportError:
     print("Error: matplotlib is required for time-domain plotting.")
     sys.exit(1)
 
-# --- Aesthetic Styling (Muted Notion Style) ---
+# --- Aesthetic Styling (Muted Notion/Tufte Style) ---
 plt.rcParams["font.family"] = "sans-serif"
 plt.rcParams["font.sans-serif"] = ["Inter", "-apple-system", "Arial", "sans-serif"]
 
@@ -30,6 +30,8 @@ NOTION_GRID = "#EDEDED"
 
 COLOR_LEFT = "#EF4444"  # Soft Red for Left Foot
 COLOR_RIGHT = "#3B82F6"  # Soft Blue for Right Foot
+COLOR_VO2 = "#10B981"  # Emerald for VO2
+COLOR_VCO2 = "#8B5CF6"  # Purple for VCO2
 COLOR_CLEAN_BG = "#D1FAE5"  # Pastel green for allowed gait patches
 
 
@@ -45,14 +47,12 @@ class CleanGaitFilter:
         l_contact = l_force > self.contact_threshold
         r_contact = r_force > self.contact_threshold
 
-        # Map binary combinations to state integers
         states = np.zeros(len(df), dtype=int)
-        states[l_contact & ~r_contact] = 1  # LSS
-        states[~l_contact & r_contact] = 2  # RSS
-        states[l_contact & r_contact] = 3  # DS
-        states[~l_contact & ~r_contact] = 0  # None
+        states[l_contact & ~r_contact] = 1  # Left Single Support (LSS)
+        states[~l_contact & r_contact] = 2  # Right Single Support (RSS)
+        states[l_contact & r_contact] = 3  # Double Support (DS)
+        states[~l_contact & ~r_contact] = 0  # None/Flight
 
-        # Find state transitions
         diff = np.diff(states)
         change_indices = np.where(diff != 0)[0] + 1
         starts = np.insert(change_indices, 0, 0)
@@ -75,22 +75,18 @@ class CleanGaitFilter:
 
     def filter_blocks(self, blocks):
         num_blocks = len(blocks)
-
-        # 1. Individual Duration Checks
         for b in blocks:
             state = b["state"]
             dur = b["duration"]
-            if state == 0:  # Flight phase is invalid for walking
+            if state == 0:
                 b["valid"] = False
-            elif state in [1, 2]:  # Single Support
+            elif state in [1, 2]:
                 if not (self.lss_bounds[0] <= dur <= self.lss_bounds[1]):
                     b["valid"] = False
-            elif state == 3:  # Double Support
+            elif state == 3:
                 if not (self.ds_bounds[0] <= dur <= self.ds_bounds[1]):
                     b["valid"] = False
 
-        # 2. Sequence Checker (Strict Loop Pattern)
-        # Expected loop: 1 -> 3 -> 2 -> 3 -> 1 ...
         for i in range(2, num_blocks - 2):
             if not blocks[i]["valid"]:
                 continue
@@ -99,10 +95,7 @@ class CleanGaitFilter:
             next_state = blocks[i + 1]["state"]
             prev_state = blocks[i - 1]["state"]
 
-            if current_state == 1:
-                if prev_state != 3 or next_state != 3:
-                    blocks[i]["valid"] = False
-            elif current_state == 2:
+            if current_state in [1, 2]:
                 if prev_state != 3 or next_state != 3:
                     blocks[i]["valid"] = False
             elif current_state == 3:
@@ -117,7 +110,6 @@ class CleanGaitFilter:
         clean_mask = np.zeros(len(df), dtype=bool)
         num_blocks = len(blocks)
 
-        # Apply neighbor consensus
         for i in range(num_blocks):
             start_check = max(0, i - neighbor_consensus)
             end_check = min(num_blocks, i + neighbor_consensus + 1)
@@ -127,7 +119,6 @@ class CleanGaitFilter:
             )
 
             if is_neighborhood_clean:
-                # Track steady state rhythmicity (duration standard deviation)
                 ds_durs = [
                     blocks[j]["duration"]
                     for j in range(start_check, end_check)
@@ -152,7 +143,7 @@ class CleanGaitFilter:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Plot Raw GRF with background highlight indicators based on the clean gait heuristic."
+        description="Plot Ground Reaction Forces along with temporal VO2/VCO2 breath dynamics."
     )
     parser.add_argument(
         "--file",
@@ -169,14 +160,14 @@ def main():
     parser.add_argument(
         "--start",
         type=float,
-        default=1300.0,
-        help="Start time in seconds for the plotted window",
+        default=None,
+        help="Start time in seconds (defaults to full trial start)",
     )
     parser.add_argument(
         "--duration",
         type=float,
-        default=30.0,
-        help="Duration of the plotted window in seconds (default: 30s)",
+        default=None,
+        help="Duration in seconds (defaults to full trial duration)",
     )
     args = parser.parse_args()
 
@@ -188,30 +179,40 @@ def main():
     print(f"Loading {os.path.basename(file_path)}...")
     df = pd.read_parquet(file_path)
 
-    # We evaluate the heuristic on the whole file to prevent window boundary artifacts
     time_all = df["time"].values
     l_force_all = df["calcn_l_force_y"].values
     r_force_all = df["calcn_r_force_y"].values
 
-    # Run heuristic with widened thresholds
-    gait_filter = CleanGaitFilter(
-        contact_threshold=args.threshold,
-        lss_bounds=(0.15, 0.60),  # Widen single-support
-        ds_bounds=(0.03, 0.35),  # Widen double-support
+    # Detect respiratory columns
+    vo2_col = next((c for c in df.columns if c.lower() == "vo2"), None)
+    vco2_col = next((c for c in df.columns if c.lower() == "vco2"), None)
+
+    # Set temporal limits
+    t_min = time_all.min()
+    t_max = time_all.max()
+
+    start_time = args.start if args.start is not None else t_min
+    duration = args.duration if args.duration is not None else (t_max - start_time)
+    end_time = min(start_time + duration, t_max)
+
+    print(
+        f"Window configured from {start_time:.1f}s to {end_time:.1f}s (Total duration: {end_time - start_time:.1f}s)"
     )
+
+    # Run clean gait segmentation
+    gait_filter = CleanGaitFilter(contact_threshold=args.threshold)
     clean_mask_all = gait_filter.identify_clean_frames(
         df, time_all, l_force_all, r_force_all, neighbor_consensus=2
     )
 
-    # Filter data to the selected zoom time window for plotting
-    df_win = df[(df["time"] >= args.start) & (df["time"] <= args.start + args.duration)]
-    mask_win = clean_mask_all[
-        (df["time"] >= args.start) & (df["time"] <= args.start + args.duration)
-    ]
+    # Filter arrays to the targeted window
+    window_mask = (df["time"] >= start_time) & (df["time"] <= end_time)
+    df_win = df[window_mask]
+    mask_win = clean_mask_all[window_mask]
 
     if df_win.empty:
         print(
-            f"Error: No data found in time window {args.start}s to {args.start + args.duration}s."
+            f"Error: No data remains in the time window {start_time}s to {end_time}s."
         )
         sys.exit(1)
 
@@ -221,23 +222,33 @@ def main():
 
     l_contact = l_force > args.threshold
     r_contact = r_force > args.threshold
-
     l_ss = l_contact & ~r_contact
     r_ss = r_contact & ~l_contact
 
-    # Create diagnostic subplots
-    fig, (ax1, ax2, ax3) = plt.subplots(
-        3, 1, figsize=(12, 8.5), sharex=True, facecolor=NOTION_BG
+    # Setup subplot rows based on metabolic column availability
+    has_metabolics = (vo2_col is not None) and (df_win[vo2_col].dropna().sum() > 0)
+    num_subplots = 4 if has_metabolics else 3
+
+    fig, axs = plt.subplots(
+        num_subplots,
+        1,
+        figsize=(12, 2.5 * num_subplots),
+        sharex=True,
+        facecolor=NOTION_BG,
     )
+
+    if num_subplots == 1:
+        axs = [axs]
+
     fig.suptitle(
-        f"Gait Signal Heuristic Verification: {os.path.basename(file_path)}",
-        fontsize=14,
+        f"Gait Signals & Gas Exchange Dynamics: {os.path.basename(file_path)}",
+        fontsize=13,
         fontweight="bold",
         color=NOTION_TEXT,
         y=0.97,
     )
 
-    for ax in [ax1, ax2, ax3]:
+    for ax in axs:
         ax.set_facecolor(NOTION_BG)
         for spine in ["top", "right"]:
             ax.spines[spine].set_visible(False)
@@ -247,41 +258,39 @@ def main():
         ax.grid(color=NOTION_GRID, linestyle="-", linewidth=0.7)
         ax.set_axisbelow(True)
 
-    # --- Plot 1: Raw Vertical Forces ---
-    ax1.plot(
+    # --- Plot 1: Vertical Forces ---
+    axs[0].plot(
         time,
         l_force,
         color=COLOR_LEFT,
-        alpha=0.8,
-        linewidth=1.5,
+        alpha=0.7,
+        linewidth=1.2,
         label="Left Force (Fy)",
     )
-    ax1.plot(
+    axs[0].plot(
         time,
         r_force,
         color=COLOR_RIGHT,
-        alpha=0.8,
-        linewidth=1.5,
+        alpha=0.7,
+        linewidth=1.2,
         label="Right Force (Fy)",
     )
-    ax1.axhline(
+    axs[0].axhline(
         args.threshold,
         color=NOTION_TEXT,
         linestyle="--",
-        linewidth=1.2,
+        linewidth=1.0,
         label=f"Threshold ({args.threshold} N)",
     )
-    ax1.set_ylabel(
-        "Vertical Force (N)", fontsize=9, fontweight="bold", color=NOTION_TEXT
-    )
-    ax1.set_title(
-        "1. Raw Vertical Ground Reaction Forces",
+    axs[0].set_ylabel("Force (N)", fontsize=9, fontweight="bold", color=NOTION_TEXT)
+    axs[0].set_title(
+        "1. Vertical Ground Reaction Forces",
         fontsize=10,
         fontweight="bold",
         color=NOTION_SUBTEXT,
         loc="left",
     )
-    ax1.legend(
+    axs[0].legend(
         loc="upper right",
         frameon=True,
         facecolor=NOTION_BG,
@@ -290,96 +299,145 @@ def main():
     )
 
     # --- Plot 2: Binary Contact States ---
-    ax2.step(
+    axs[1].step(
         time,
         l_contact.astype(int) + 0.05,
         where="post",
         color=COLOR_LEFT,
-        linewidth=1.5,
+        linewidth=1.2,
         label="Left Contact",
     )
-    ax2.step(
+    axs[1].step(
         time,
         r_contact.astype(int) - 0.05,
         where="post",
         color=COLOR_RIGHT,
-        linewidth=1.5,
+        linewidth=1.2,
         label="Right Contact",
     )
-    ax2.set_yticks([0, 1])
-    ax2.set_yticklabels(["Off", "On"])
-    ax2.set_ylim(-0.2, 1.2)
-    ax2.set_ylabel("Contact State", fontsize=9, fontweight="bold", color=NOTION_TEXT)
-    ax2.set_title(
+    axs[1].set_yticks([0, 1])
+    axs[1].set_yticklabels(["Off", "On"])
+    axs[1].set_ylim(-0.2, 1.2)
+    axs[1].set_ylabel("Contact", fontsize=9, fontweight="bold", color=NOTION_TEXT)
+    axs[1].set_title(
         "2. Binary Contact States (Force > Threshold)",
         fontsize=10,
         fontweight="bold",
         color=NOTION_SUBTEXT,
         loc="left",
     )
-    ax2.legend(
-        loc="upper right",
-        frameon=True,
-        facecolor=NOTION_BG,
-        edgecolor=NOTION_GRID,
-        fontsize=8,
-    )
 
-    # --- Plot 3: Resulting Single-Support Windows ---
-    ax3.step(
+    # --- Plot 3: Single-Support Active ---
+    axs[2].step(
         time,
         l_ss.astype(int) + 0.05,
         where="post",
         color=COLOR_LEFT,
-        linewidth=1.5,
+        linewidth=1.2,
         label="Left Single Support",
     )
-    ax3.step(
+    axs[2].step(
         time,
         r_ss.astype(int) - 0.05,
         where="post",
         color=COLOR_RIGHT,
-        linewidth=1.5,
+        linewidth=1.2,
         label="Right Single Support",
     )
-    ax3.set_yticks([0, 1])
-    ax3.set_yticklabels(["Off", "On"])
-    ax3.set_ylim(-0.2, 1.2)
-    ax3.set_ylabel(
-        "Single-Support Active", fontsize=9, fontweight="bold", color=NOTION_TEXT
+    axs[2].set_yticks([0, 1])
+    axs[2].set_yticklabels(["Off", "On"])
+    axs[2].set_ylim(-0.2, 1.2)
+    axs[2].set_ylabel(
+        "Single Support", fontsize=9, fontweight="bold", color=NOTION_TEXT
     )
-    ax3.set_xlabel("Time (seconds)", fontsize=10, fontweight="bold", color=NOTION_TEXT)
-    ax3.set_title(
-        "3. Resulting Single-Support Windows (Contact L & Not Contact R)",
+    axs[2].set_title(
+        "3. Single-Support Windows",
         fontsize=10,
         fontweight="bold",
         color=NOTION_SUBTEXT,
         loc="left",
     )
-    ax3.legend(
-        loc="upper right",
-        frameon=True,
-        facecolor=NOTION_BG,
-        edgecolor=NOTION_GRID,
-        fontsize=8,
+
+    # --- Plot 4: VO2 & VCO2 Profiles (If Present) ---
+    if has_metabolics:
+        vo2_vals = df_win[vo2_col].values
+        vco2_vals = df_win[vco2_col].values if vco2_col else None
+
+        # Mask zero and missing values typical of gas exchange transitions
+        valid_indices = (vo2_vals > 0) & (~np.isnan(vo2_vals))
+        t_met = time[valid_indices]
+        vo2_clean = vo2_vals[valid_indices]
+
+        axs[3].plot(
+            t_met,
+            vo2_clean,
+            color=COLOR_VO2,
+            marker="o",
+            markersize=3,
+            linewidth=1.2,
+            label="VO2 (O2 Consumption)",
+        )
+
+        if vco2_vals is not None:
+            vco2_clean = vco2_vals[valid_indices]
+            axs[3].plot(
+                t_met,
+                vco2_clean,
+                color=COLOR_VCO2,
+                marker="s",
+                markersize=3,
+                linewidth=1.2,
+                label="VCO2 (CO2 Production)",
+            )
+
+        axs[3].set_ylabel(
+            "Rate (mL/min)", fontsize=9, fontweight="bold", color=NOTION_TEXT
+        )
+        axs[3].set_title(
+            "4. Respiratory Gas Exchange (Indirect Calorimetry)",
+            fontsize=10,
+            fontweight="bold",
+            color=NOTION_SUBTEXT,
+            loc="left",
+        )
+        axs[3].legend(
+            loc="upper left",
+            frameon=True,
+            facecolor=NOTION_BG,
+            edgecolor=NOTION_GRID,
+            fontsize=8,
+        )
+
+        # Print baseline averages inside terminal
+        mean_vo2 = np.mean(vo2_clean)
+        mean_vco2 = np.mean(vco2_clean) if vco2_vals is not None else 0.85 * mean_vo2
+        cal_per_min = 3.941 * mean_vo2 + 1.106 * mean_vco2
+        watts = cal_per_min * 4.184 / 60.0
+
+        print("\nTrial Metabolic Summary Statistics:")
+        print(f"  - Mean VO2  : {mean_vo2:.1f} mL/min")
+        if vco2_col:
+            print(f"  - Mean VCO2 : {mean_vco2:.1f} mL/min")
+        print(f"  - Calculated Gross Biological Cost: {watts:.1f} W")
+
+    axs[-1].set_xlabel(
+        "Time (seconds)", fontsize=10, fontweight="bold", color=NOTION_TEXT
     )
 
-    # --- Highlight Heuristic Decisions in the Background of All Subplots ---
-    for ax in [ax1, ax2, ax3]:
-        # Shade allowed clean patches in soft green
+    # Shading the background with the Clean Segment Mask
+    for ax in axs:
         ax.fill_between(
             time,
             0,
             1,
             where=mask_win,
             color=COLOR_CLEAN_BG,
-            alpha=0.35,
+            alpha=0.3,
             transform=ax.get_xaxis_transform(),
             zorder=1,
-            label="Allowed (Clean Patch)",
         )
 
-    plt.xlim(args.start, args.start + args.duration)
+    plt.xlim(start_time, end_time)
     plt.tight_layout()
     plt.show()
 
