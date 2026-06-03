@@ -1,6 +1,10 @@
 import argparse
 import os
 import sys
+import zipfile
+import tempfile
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
@@ -18,6 +22,18 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "../../../"))
 DEFAULT_INPUT_DIR = "/Users/keenonwerling/Desktop/data/Katie Exoskeleton"
 DEFAULT_OUTPUT_DIR = os.path.join(REPO_ROOT, "exported_pogensee")
+
+
+def get_worker_count():
+    """Returns the number of workers based on the OS."""
+    if sys.platform.startswith('linux'):
+        try:
+            # sched_getaffinity returns the set of CPUs the process is eligible to run on
+            return len(os.sched_getaffinity(0))
+        except AttributeError:
+            pass
+    # Fallback for Windows, macOS, or if sched_getaffinity is unavailable
+    return os.cpu_count() or 4
 
 
 def load_mat_file(file_path):
@@ -183,7 +199,6 @@ def optimize_offsets(raw_signals, max_fz_adjust=5.0, contact_thresh=30.0):
     )
 
     # Pass 2: Vertical Equalization & Horizontal Centering
-    # Now calculated on the gated signals to prevent swing-phase chatter from corrupting the stance masks
     L_SS_mask = (zeroed_forced["L"]["Fz"] > contact_thresh) & (
         zeroed_forced["R"]["Fz"] == 0.0
     )
@@ -198,8 +213,6 @@ def optimize_offsets(raw_signals, max_fz_adjust=5.0, contact_thresh=30.0):
         mean_R_SS = np.mean(zeroed_forced["R"]["Fz"][R_SS_mask])
 
         difference_fz = mean_L_SS - mean_R_SS
-        # f_z_adjust_L = np.clip(difference_fz / 2.0, -max_fz_adjust, max_fz_adjust)
-        # f_z_adjust_R = np.clip(-difference_fz / 2.0, -max_fz_adjust, max_fz_adjust)
         f_z_adjust_L = difference_fz / 2.0
         f_z_adjust_R = -difference_fz / 2.0
 
@@ -290,11 +303,11 @@ def get_best_qs_match(target_path, qs_baselines):
 
 
 def export_trial(
-    file_path, input_dir, output_dir, baseline_w=None, matched_qs_path=None
+    file_path, input_dir, zip_name, output_dir, baseline_w=None, matched_qs_path=None
 ):
     """Translates a single Pogensee .mat file to a transformed, zero-corrected Parquet file."""
     rel_path_for_display = os.path.relpath(file_path, input_dir)
-    print(f"\n  Processing: {rel_path_for_display}")
+    print(f"\n  Processing: {rel_path_for_display} (From: {zip_name}.zip)")
 
     try:
         mat_data, is_v73 = load_mat_file(file_path)
@@ -349,8 +362,7 @@ def export_trial(
     RMy_clean = zeroed_forced["R"]["My"]
     RMz_clean = zeroed_forced["R"]["Mz"]
 
-    # Print log of optimized adjustments to standard output for review
-    print(f"    Optimized Zero-Bias Offsets:")
+    print(f"    [{zip_name}] Optimized Zero-Bias Offsets:")
     print(
         f"      Left Plate  -> Fx: {biases['L']['Fx']:+.3f} N (Centered), Fy: {biases['L']['Fy']:+.3f} N (Centered), Fz: {biases['L']['Fz']:+.3f} N"
     )
@@ -470,32 +482,73 @@ def export_trial(
     if is_v73:
         mat_data.close()
 
-    # Create safe unique filename based on folder path
+    # Create safe unique filename based on the zip name and the relative folder path
     rel_path = os.path.relpath(file_path, input_dir)
     rel_path_no_ext = os.path.splitext(rel_path)[0]
 
-    # Replace slashes, backslashes, and spaces with underscores
-    safe_name = (
-        rel_path_no_ext.replace(os.sep, "_")
-        .replace("/", "_")
-        .replace("\\", "_")
-        .replace(" ", "_")
-    )
+    # Combine zip name and path, replacing problem characters with underscores
+    safe_name = f"{zip_name}_{rel_path_no_ext}".replace(os.sep, "_").replace("/", "_").replace("\\", "_").replace(" ", "_")
+    
     out_file_path = os.path.join(output_dir, f"{safe_name}.parquet")
 
     df.to_parquet(out_file_path, index=False)
     print(f"    Saved Parquet -> {out_file_path}")
 
 
+def process_zip(zip_path, output_dir):
+    """Worker function to extract a zip to a temporary dir and process its .mat files."""
+    print(f"Opening Zip Archive: {zip_path}")
+    zip_name = os.path.splitext(os.path.basename(zip_path))[0]
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(temp_dir)
+        except zipfile.BadZipFile:
+            print(f"Error: Could not read {zip_path} as a valid zip file.")
+            return
+
+        mat_files = [ ]
+        qs_files = [ ]
+
+        for root, _, files in os.walk(temp_dir):
+            for f in files:
+                if f.endswith(".mat") and not f.startswith("."):
+                    full_path = os.path.join(root, f)
+                    if "QS" in f:
+                        qs_files.append(full_path)
+                    else:
+                        mat_files.append(full_path)
+
+        if not mat_files:
+            print(f"No active trial .mat files found inside: {zip_path}")
+            return
+
+        print(f"[{zip_name}] Found {len(mat_files)} active trial file(s) and {len(qs_files)} QS file(s).")
+
+        qs_baselines = {}
+        for qs_file in qs_files:
+            baseline = calculate_qs_baseline(qs_file)
+            if baseline is not None:
+                qs_baselines[qs_file] = baseline
+                print(f"  [{zip_name}] Extracted baseline: {baseline:.1f} W from {os.path.basename(qs_file)}")
+            else:
+                print(f"  [{zip_name}] No valid metabolic data in {os.path.basename(qs_file)}")
+
+        for file_path in sorted(mat_files):
+            best_qs_path, baseline_w = get_best_qs_match(file_path, qs_baselines)
+            export_trial(file_path, temp_dir, zip_name, output_dir, baseline_w, best_qs_path)
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Process Katie Exoskeleton .mat trial files to Parquet."
+        description="Process Katie Exoskeleton .zip trial files to Parquet."
     )
     parser.add_argument(
         "--dir",
         type=str,
         default=DEFAULT_INPUT_DIR,
-        help="Path to the directory containing Katie Exoskeleton mat subfolders",
+        help="Path to the directory containing Katie Exoskeleton zip files",
     )
     parser.add_argument(
         "--out",
@@ -516,45 +569,37 @@ def main():
 
     os.makedirs(output_dir, exist_ok=True)
 
-    mat_files = []
-    qs_files = []
+    zip_files = [ ]
     for root, _, files in os.walk(input_dir):
         for f in files:
-            if f.endswith(".mat") and not f.startswith("."):
-                full_path = os.path.join(root, f)
-                if "QS" in f:
-                    qs_files.append(full_path)
-                else:
-                    mat_files.append(full_path)
+            if f.endswith(".zip") and not f.startswith("."):
+                zip_files.append(os.path.join(root, f))
 
-    if not mat_files:
-        print(f"No active trial .mat files found in: {input_dir}")
+    if not zip_files:
+        print(f"No active trial .zip files found in: {input_dir}")
         return
+        
+    worker_count = get_worker_count()
+    print(f"\nDiscovered {len(zip_files)} zip file(s) to process.")
+    print(f"Starting multiprocessing pool with {worker_count} workers based on the OS...")
 
-    print(
-        f"Found {len(mat_files)} active trial file(s) and {len(qs_files)} QS file(s)."
-    )
-
-    # Extract baselines from QS files
-    print("\nExtracting baselines from Quiet Standing (QS) trials...")
-    qs_baselines = {}
-    for qs_file in qs_files:
-        baseline = calculate_qs_baseline(qs_file)
-        if baseline is not None:
-            qs_baselines[qs_file] = baseline
-            print(
-                f"  -> Extracted baseline: {baseline:.1f} W from {os.path.basename(qs_file)}"
-            )
-        else:
-            print(f"  -> No valid metabolic data in {os.path.basename(qs_file)}")
-
-    print("\nBeginning export processing...")
-    for file_path in sorted(mat_files):
-        best_qs_path, baseline_w = get_best_qs_match(file_path, qs_baselines)
-        export_trial(file_path, input_dir, output_dir, baseline_w, best_qs_path)
+    # Spawn worker processes for each zip file
+    with ProcessPoolExecutor(max_workers=worker_count) as executor:
+        futures = [ ]
+        for zip_file in zip_files:
+            futures.append(executor.submit(process_zip, zip_file, output_dir))
+        
+        # Monitor the completions for error reporting
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception as e:
+                print(f"\nWorker generated an exception: {e}")
 
     print("\nExport process completed.")
 
 
 if __name__ == "__main__":
+    # Needed for windows multiprocessing safety
+    multiprocessing.freeze_support()
     main()

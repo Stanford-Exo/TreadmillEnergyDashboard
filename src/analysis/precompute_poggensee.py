@@ -1,7 +1,7 @@
-# File: src/analysis/precompute_poggensee.py
-
 import argparse
 import glob
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import os
 import sys
 import traceback
@@ -27,6 +27,16 @@ except ImportError:
     print(
         "Warning: 'numba' is not installed. Math operations will fall back to standard Python."
     )
+
+
+def get_worker_count():
+    """Returns the number of workers based on the OS."""
+    if sys.platform.startswith("linux"):
+        try:
+            return len(os.sched_getaffinity(0))
+        except AttributeError:
+            pass
+    return os.cpu_count() or 4
 
 
 def njit_opt(func):
@@ -127,11 +137,9 @@ def extract_biological_components(human_power, dt):
 
 
 # --- State-Machine Clean Gait Heuristics ---
-
-
 class CleanGaitFilter:
     def __init__(
-        self, contact_threshold=30.0, lss_bounds=(0.15, 0.60), ds_bounds=(0.03, 0.35)
+        self, contact_threshold=1.0, lss_bounds=(0.15, 0.60), ds_bounds=(0.03, 0.35)
     ):
         self.contact_threshold = contact_threshold
         self.lss_bounds = lss_bounds
@@ -353,6 +361,11 @@ def compile_clean_window_row(
     con_exo_mean = np.mean(profiles_arr["contra_exo"], axis=0)
     con_exo_std = np.std(profiles_arr["contra_exo"], axis=0)
 
+    ref_hum_mean = np.mean(profiles_arr["ref_hum"], axis=0)
+    con_hum_mean = np.mean(profiles_arr["contra_hum"], axis=0)
+    ref_sys_mean = np.mean(profiles_arr["ref_sys"], axis=0)
+    con_sys_mean = np.mean(profiles_arr["contra_sys"], axis=0)
+
     com_x_mean = np.mean(profiles_arr["com_x"], axis=0)
     com_y_mean = np.mean(profiles_arr["com_y"], axis=0)
     com_z_mean = np.mean(profiles_arr["com_z"], axis=0)
@@ -396,33 +409,32 @@ def compile_clean_window_row(
         np.std(con_ach_raw, axis=0),
     )
 
-    j_pos_ref = np.trapz(np.maximum(ref_mus_mean, 0), dx=dt_stride)
-    j_neg_ref = abs(np.trapz(np.minimum(ref_mus_mean, 0), dx=dt_stride))
-    j_pos_con = np.trapz(np.maximum(con_mus_mean, 0), dx=dt_stride)
-    j_neg_con = abs(np.trapz(np.minimum(con_mus_mean, 0), dx=dt_stride))
+    # Replaced np.trapz with trapz_1d everywhere
+    j_pos_ref = trapz_1d(np.maximum(ref_mus_mean, 0), dt_stride)
+    j_neg_ref = abs(trapz_1d(np.minimum(ref_mus_mean, 0), dt_stride))
+    j_pos_con = trapz_1d(np.maximum(con_mus_mean, 0), dt_stride)
+    j_neg_con = abs(trapz_1d(np.minimum(con_mus_mean, 0), dt_stride))
     est_mech_watts = (
         (4 * j_pos_ref + 1 * j_neg_ref) + (4 * j_pos_con + 1 * j_neg_con)
     ) / mean_stride_dur
 
-    ref_hum_mean = np.mean(profiles_arr["ref_hum"], axis=0)
-    con_hum_mean = np.mean(profiles_arr["contra_hum"], axis=0)
-    j_pos_ref_raw = np.trapz(np.maximum(ref_hum_mean, 0), dx=dt_stride)
-    j_neg_ref_raw = abs(np.trapz(np.minimum(ref_hum_mean, 0), dx=dt_stride))
-    j_pos_con_raw = np.trapz(np.maximum(con_hum_mean, 0), dx=dt_stride)
-    j_neg_con_raw = abs(np.trapz(np.minimum(con_hum_mean, 0), dx=dt_stride))
+    j_pos_ref_raw = trapz_1d(np.maximum(ref_hum_mean, 0), dt_stride)
+    j_neg_ref_raw = abs(trapz_1d(np.minimum(ref_hum_mean, 0), dt_stride))
+    j_pos_con_raw = trapz_1d(np.maximum(con_hum_mean, 0), dt_stride)
+    j_neg_con_raw = abs(trapz_1d(np.minimum(con_hum_mean, 0), dt_stride))
     est_mech_watts_no_achilles = (
         (4 * j_pos_ref_raw + 1 * j_neg_ref_raw)
         + (4 * j_pos_con_raw + 1 * j_neg_con_raw)
     ) / mean_stride_dur
 
     # Integrate Achilles components
-    j_pos_ref_ach = np.trapz(np.maximum(ref_ach_mean, 0), dx=dt_stride)
-    j_neg_ref_ach = abs(np.trapz(np.minimum(ref_ach_mean, 0), dx=dt_stride))
-    j_pos_con_ach = np.trapz(np.maximum(con_ach_mean, 0), dx=dt_stride)
-    j_neg_con_ach = abs(np.trapz(np.minimum(con_ach_mean, 0), dx=dt_stride))
+    j_pos_ref_ach = trapz_1d(np.maximum(ref_ach_mean, 0), dt_stride)
+    j_neg_ref_ach = abs(trapz_1d(np.minimum(ref_ach_mean, 0), dt_stride))
+    j_pos_con_ach = trapz_1d(np.maximum(con_ach_mean, 0), dt_stride)
+    j_neg_con_ach = abs(trapz_1d(np.minimum(con_ach_mean, 0), dt_stride))
 
     exo_power_net = (
-        np.trapz(ref_exo_mean, dx=dt_stride) + np.trapz(con_exo_mean, dx=dt_stride)
+        trapz_1d(ref_exo_mean, dt_stride) + trapz_1d(con_exo_mean, dt_stride)
     ) / mean_stride_dur
 
     stride_mech_powers = []
@@ -432,10 +444,10 @@ def compile_clean_window_row(
     for s_idx in range(len(window_cycles)):
         r_mus = ref_mus_raw[s_idx]
         c_mus = con_mus_raw[s_idx]
-        j_pos_r = np.trapz(np.maximum(r_mus, 0), dx=dt_stride)
-        j_neg_r = abs(np.trapz(np.minimum(r_mus, 0), dx=dt_stride))
-        j_pos_c = np.trapz(np.maximum(c_mus, 0), dx=dt_stride)
-        j_neg_c = abs(np.trapz(np.minimum(c_mus, 0), dx=dt_stride))
+        j_pos_r = trapz_1d(np.maximum(r_mus, 0), dt_stride)
+        j_neg_r = abs(trapz_1d(np.minimum(r_mus, 0), dt_stride))
+        j_pos_c = trapz_1d(np.maximum(c_mus, 0), dt_stride)
+        j_neg_c = abs(trapz_1d(np.minimum(c_mus, 0), dt_stride))
         p_mech = (
             (4 * j_pos_r + 1 * j_neg_r) + (4 * j_pos_c + 1 * j_neg_c)
         ) / mean_stride_dur
@@ -443,10 +455,10 @@ def compile_clean_window_row(
 
         r_hum = profiles_arr["ref_hum"][s_idx]
         c_hum = profiles_arr["contra_hum"][s_idx]
-        j_pos_r_raw = np.trapz(np.maximum(r_hum, 0), dx=dt_stride)
-        j_neg_r_raw = abs(np.trapz(np.minimum(r_hum, 0), dx=dt_stride))
-        j_pos_c_raw = np.trapz(np.maximum(c_hum, 0), dx=dt_stride)
-        j_neg_c_raw = abs(np.trapz(np.minimum(c_hum, 0), dx=dt_stride))
+        j_pos_r_raw = trapz_1d(np.maximum(r_hum, 0), dt_stride)
+        j_neg_r_raw = abs(trapz_1d(np.minimum(r_hum, 0), dt_stride))
+        j_pos_c_raw = trapz_1d(np.maximum(c_hum, 0), dt_stride)
+        j_neg_c_raw = abs(trapz_1d(np.minimum(c_hum, 0), dt_stride))
         p_mech_no_ach = (
             (4 * j_pos_r_raw + 1 * j_neg_r_raw) + (4 * j_pos_c_raw + 1 * j_neg_c_raw)
         ) / mean_stride_dur
@@ -455,7 +467,7 @@ def compile_clean_window_row(
         r_exo = profiles_arr["ref_exo"][s_idx]
         c_exo = profiles_arr["contra_exo"][s_idx]
         p_exo = (
-            np.trapz(r_exo, dx=dt_stride) + np.trapz(c_exo, dx=dt_stride)
+            trapz_1d(r_exo, dt_stride) + trapz_1d(c_exo, dt_stride)
         ) / mean_stride_dur
         stride_exo_powers.append(p_exo)
 
@@ -494,6 +506,12 @@ def compile_clean_window_row(
     }
 
     for i in range(100):
+        # Full Hum/Sys averages for regression
+        row[f"ref_hum_w_{i:02d}"] = ref_hum_mean[i]
+        row[f"con_hum_w_{i:02d}"] = con_hum_mean[i]
+        row[f"ref_sys_w_{i:02d}"] = ref_sys_mean[i]
+        row[f"con_sys_w_{i:02d}"] = con_sys_mean[i]
+
         row[f"ref_exo_w_{i:02d}"] = ref_exo_mean[i]
         row[f"ref_ach_w_{i:02d}"] = ref_ach_mean[i]
         row[f"ref_mus_w_{i:02d}"] = ref_mus_mean[i]
@@ -543,14 +561,13 @@ def process_trial(df, left_body, right_body, trial_name, window_s, min_window_s)
     velR_vals = df["velaR"].values if "velaR" in df.columns else np.zeros(len(df))
 
     # --- 1. Compute State-Machine Clean Gait Heuristics ---
-    gait_filter = CleanGaitFilter(contact_threshold=30.0)
+    gait_filter = CleanGaitFilter(contact_threshold=1.0)
     clean_mask, blocks = gait_filter.identify_clean_frames_and_blocks(
         df, times, left_forces[:, 1], right_forces[:, 1], neighbor_consensus=2
     )
 
     clean_indices = np.where(clean_mask)[0]
     if len(clean_indices) == 0:
-        print(f"  -> Skipped {trial_name}: No clean gait patches detected.")
         return []
 
     first_clean_idx = clean_indices[0]
@@ -560,22 +577,12 @@ def process_trial(df, left_body, right_body, trial_name, window_s, min_window_s)
     t_last = times[last_clean_idx]
     true_duration = t_last - t_first
 
-    print(
-        f"  -> True Clean Duration: {true_duration:.1f}s (From {t_first:.1f}s to {t_last:.1f}s)"
-    )
-
     if true_duration < min_window_s:
-        print(
-            f"  -> Skipped {trial_name}: True duration ({true_duration:.1f}s) is shorter than min required ({min_window_s}s)."
-        )
         return []
 
     # --- 2. Extract Whole Clean Gait Cycles ---
     clean_cycles = find_clean_cycles(blocks, times)
     if not clean_cycles:
-        print(
-            f"  -> Skipped {trial_name}: No complete clean gait cycles could be extracted."
-        )
         return []
 
     # --- 3. Run COM filter from frame 0 for convergence ---
@@ -626,17 +633,12 @@ def process_trial(df, left_body, right_body, trial_name, window_s, min_window_s)
     while current_window_start + window_s <= t_last:
         current_window_end = current_window_start + window_s
 
-        # Rigidly enforce strict containment: cycles must start and end within the window
         window_cycles = [
             c
             for c in clean_cycles
             if c["start_time"] >= current_window_start
             and c["end_time"] <= current_window_end
         ]
-
-        print(
-            f"    - Window [{current_window_start:.1f}s - {current_window_end:.1f}s]: Included {len(window_cycles)} clean cycles."
-        )
 
         if window_cycles:
             df_win = df[
@@ -666,10 +668,6 @@ def process_trial(df, left_body, right_body, trial_name, window_s, min_window_s)
             and c["end_time"] <= current_window_end
         ]
 
-        print(
-            f"    - Window-Tail [{current_window_start:.1f}s - {current_window_end:.1f}s]: Included {len(window_cycles)} clean cycles."
-        )
-
         if window_cycles:
             df_win = df[
                 (df["time"] >= current_window_start)
@@ -697,7 +695,6 @@ def process_file_sequential(file_path, window, min_window):
     try:
         df = pd.read_parquet(file_path)
     except Exception as e:
-        print(f"  -> Error reading {filename}: {e}")
         return None
 
     force_cols = [col for col in df.columns if col.endswith("_force_y")]
@@ -716,7 +713,6 @@ def process_file_sequential(file_path, window, min_window):
             df, left_body, right_body, trial_name, window, min_window
         )
     except Exception as e:
-        print(f"  -> Calculation error on {filename}: {e}")
         traceback.print_exc()
         return None
 
@@ -734,6 +730,7 @@ def main():
         default=300.0,
         help="Window size in seconds (default: 300s)",
     )
+    parser.add_argument('--force-refresh', action='store_true')
     parser.add_argument(
         "--min-window",
         type=float,
@@ -763,7 +760,7 @@ def main():
             print(f"Warning: Could not read skipped log: {e}")
 
     existing_df = pd.DataFrame()
-    if os.path.exists(parquet_path):
+    if os.path.exists(parquet_path) and not args.force_refresh:
         try:
             existing_df = pd.read_parquet(parquet_path)
             if not existing_df.empty and "trial_name" in existing_df.columns:
@@ -796,30 +793,56 @@ def main():
         dummy_power = np.random.randn(100).astype(np.float64)
         _ = extract_biological_components(dummy_power, 0.01)
 
-    print(f"\nProcessing {len(files_to_process)} trial(s) sequentially...")
+    worker_count = get_worker_count()
+    print(
+        f"\nProcessing {len(files_to_process)} trial(s) using {worker_count} workers..."
+    )
 
-    for f_idx, file_path in enumerate(files_to_process):
-        t_name = os.path.splitext(os.path.basename(file_path))[0]
-        print(f"\n[{f_idx + 1}/{len(files_to_process)}] Processing: {t_name}")
+    # Dispatch to multiprocess pool
+    with ProcessPoolExecutor(max_workers=worker_count) as executor:
+        # Create a dictionary of futures to track execution
+        futures = {
+            executor.submit(process_file_sequential, f, args.window, args.min_window): f
+            for f in files_to_process
+        }
 
-        trial_rows = process_file_sequential(file_path, args.window, args.min_window)
+        completed = 0
+        for future in as_completed(futures):
+            file_path = futures[future]
+            t_name = os.path.splitext(os.path.basename(file_path))[0]
+            completed += 1
+            print(
+                f"\n[{completed}/{len(files_to_process)}] Finished worker execution for: {t_name}"
+            )
 
-        if trial_rows:
-            new_rows_df = pd.DataFrame(trial_rows)
-            existing_df = pd.concat([existing_df, new_rows_df], ignore_index=True)
-            existing_df.to_parquet(parquet_path, index=False)
-            print(f"  -> Successfully precomputed and saved {len(trial_rows)} windows.")
-        else:
-            print(f"  -> Skipping trial: {t_name} (Failed to yield valid segments).")
             try:
-                with open(skipped_log_path, "a", encoding="utf-8") as f:
-                    f.write(f"{t_name}\n")
-                skipped_trials.add(t_name)
-            except Exception:
-                pass
+                trial_rows = future.result()
+                if trial_rows:
+                    new_rows_df = pd.DataFrame(trial_rows)
+                    existing_df = pd.concat(
+                        [existing_df, new_rows_df], ignore_index=True
+                    )
+                    # We write sequentially back to Parquet upon each success to safely checkpoint
+                    existing_df.to_parquet(parquet_path, index=False)
+                    print(
+                        f"  -> Successfully precomputed and saved {len(trial_rows)} window(s)."
+                    )
+                else:
+                    print(
+                        f"  -> Skipping trial: {t_name} (Failed to yield valid segments)."
+                    )
+                    try:
+                        with open(skipped_log_path, "a", encoding="utf-8") as f_log:
+                            f_log.write(f"{t_name}\n")
+                        skipped_trials.add(t_name)
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"  -> Worker exception on {t_name}: {e}")
 
     print("\nPrecompute process completed.")
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     main()
