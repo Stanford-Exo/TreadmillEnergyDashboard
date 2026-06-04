@@ -160,7 +160,7 @@ class CleanGaitFilter:
         starts = np.insert(change_indices, 0, 0)
         ends = np.append(change_indices, len(df))
 
-        blocks = []
+        blocks = [ ]
         for s, e in zip(starts, ends):
             blocks.append(
                 {
@@ -248,7 +248,7 @@ class CleanGaitFilter:
 
 
 def find_clean_cycles(blocks, times):
-    cycles = []
+    cycles = [ ]
     num_blocks = len(blocks)
     for i in range(num_blocks - 4):
         if blocks[i]["state"] == 1 and blocks[i]["valid"]:
@@ -296,7 +296,7 @@ def resample_gait_cycle(times, values, num_points=100):
 
 
 def compile_clean_window_row(
-    df_win, inst_records, window_cycles, times, trial_name, window_start_s
+    df_win, inst_records, window_cycles, times, trial_name, window_start_s, subject_mass
 ):
     vo2_col = next((c for c in df_win.columns if c.lower() == "vo2"), None)
     vco2_col = next((c for c in df_win.columns if c.lower() == "vco2"), None)
@@ -304,13 +304,7 @@ def compile_clean_window_row(
     if not vo2_col:
         return None
 
-    # Calculate row-by-row metabolic cost to compute variance across the window
-    vo2_series = df_win[vo2_col].replace(0, np.nan)
-    vco2_series = df_win[vco2_col].replace(0, np.nan) if vco2_col else 0.85 * vo2_series
-    row_bio_watts = (3.941 * vo2_series + 1.106 * vco2_series) * 4.184 / 60.0
-    row_bio_watts = row_bio_watts.dropna()
-
-    vo2_mean = vo2_series.dropna().mean()
+    vo2_mean = df_win[vo2_col].replace(0, np.nan).dropna().mean()
     if pd.isna(vo2_mean) or vo2_mean <= 0:
         return None
 
@@ -319,13 +313,16 @@ def compile_clean_window_row(
         if vco2_col
         else 0.85 * vo2_mean
     )
+    
+    # Calculate watts and normalize by body mass (W/kg)
     cal_per_min = 3.941 * vo2_mean + 1.106 * vco2_mean
-    bio_watts = cal_per_min * 4.184 / 60.0
-    bio_watts_std = float(row_bio_watts.std()) if len(row_bio_watts) > 1 else 0.0
+    bio_watts = (cal_per_min * 4.184 / 60.0) / subject_mass
 
-    standing_baseline = (
-        df_win["qs_baseline_w"].iloc[0] if "qs_baseline_w" in df_win.columns else 70.0
+    # Assuming 'qs_baseline_w' was originally an absolute wattage
+    standing_baseline_abs = (
+        df_win["qs_baseline_w"].iloc[0] if "qs_baseline_w" in df_win.columns else (70.0 * subject_mass) # if defaulting, scale roughly as 1W/kg
     )
+    standing_baseline = standing_baseline_abs / subject_mass
     net_bio_watts = bio_watts - standing_baseline
 
     cycles_durs = [c["stride_dur"] for c in window_cycles]
@@ -338,7 +335,7 @@ def compile_clean_window_row(
     dt_stride = mean_stride_dur / 100.0
 
     profiles = {
-        k: []
+        k: [ ]
         for k in [
             "ref_exo",
             "contra_exo",
@@ -349,6 +346,10 @@ def compile_clean_window_row(
             "com_x",
             "com_y",
             "com_z",
+            "ref_pos",
+            "contra_pos",
+            "ref_tau",
+            "contra_tau",
         ]
     }
 
@@ -379,18 +380,28 @@ def compile_clean_window_row(
     com_x_std = np.std(profiles_arr["com_x"], axis=0)
     com_y_std = np.std(profiles_arr["com_y"], axis=0)
     com_z_std = np.std(profiles_arr["com_z"], axis=0)
+    
+    ref_pos_mean = np.mean(profiles_arr["ref_pos"], axis=0)
+    con_pos_mean = np.mean(profiles_arr["contra_pos"], axis=0)
+    ref_tau_mean = np.mean(profiles_arr["ref_tau"], axis=0)
+    con_tau_mean = np.mean(profiles_arr["contra_tau"], axis=0)
+
+    ref_pos_std = np.std(profiles_arr["ref_pos"], axis=0)
+    con_pos_std = np.std(profiles_arr["contra_pos"], axis=0)
+    ref_tau_std = np.std(profiles_arr["ref_tau"], axis=0)
+    con_tau_std = np.std(profiles_arr["contra_tau"], axis=0)
 
     com_x_centered = com_x_mean - np.mean(com_x_mean)
     com_y_centered = com_y_mean - np.mean(com_y_mean)
     com_z_centered = com_z_mean - np.mean(com_z_mean)
 
-    ref_mus_raw, ref_ach_raw = [], []
+    ref_mus_raw, ref_ach_raw = [ ], [ ]
     for rh in profiles_arr["ref_hum"]:
         rm, ra = extract_biological_components(rh, dt_stride)
         ref_mus_raw.append(rm)
         ref_ach_raw.append(ra)
 
-    con_mus_raw, con_ach_raw = [], []
+    con_mus_raw, con_ach_raw = [ ], [ ]
     for ch in profiles_arr["contra_hum"]:
         cm, ca = extract_biological_components(ch, dt_stride)
         con_mus_raw.append(cm)
@@ -416,7 +427,6 @@ def compile_clean_window_row(
         np.std(con_ach_raw, axis=0),
     )
 
-    # Replaced np.trapz with trapz_1d everywhere
     j_pos_ref = trapz_1d(np.maximum(ref_mus_mean, 0), dt_stride)
     j_neg_ref = abs(trapz_1d(np.minimum(ref_mus_mean, 0), dt_stride))
     j_pos_con = trapz_1d(np.maximum(con_mus_mean, 0), dt_stride)
@@ -434,7 +444,6 @@ def compile_clean_window_row(
         + (4 * j_pos_con_raw + 1 * j_neg_con_raw)
     ) / mean_stride_dur
 
-    # Integrate Achilles components
     j_pos_ref_ach = trapz_1d(np.maximum(ref_ach_mean, 0), dt_stride)
     j_neg_ref_ach = abs(trapz_1d(np.minimum(ref_ach_mean, 0), dt_stride))
     j_pos_con_ach = trapz_1d(np.maximum(con_ach_mean, 0), dt_stride)
@@ -444,9 +453,9 @@ def compile_clean_window_row(
         trapz_1d(ref_exo_mean, dt_stride) + trapz_1d(con_exo_mean, dt_stride)
     ) / mean_stride_dur
 
-    stride_mech_powers = []
-    stride_mech_powers_no_achilles = []
-    stride_exo_powers = []
+    stride_mech_powers = [ ]
+    stride_mech_powers_no_achilles = [ ]
+    stride_exo_powers = [ ]
 
     for s_idx in range(len(window_cycles)):
         r_mus = ref_mus_raw[s_idx]
@@ -488,34 +497,33 @@ def compile_clean_window_row(
 
     row = {
         "trial_name": trial_name,
+        "subject_mass_kg": subject_mass,
         "window_start_s": float(window_start_s),
         "mean_stride_duration_s": mean_stride_dur,
         "mean_duty_factor": mean_duty_factor,
         "duty_factor_std": duty_factor_std,
         "num_valid_strides": len(window_cycles),
-        "bio_watts": bio_watts,
-        "bio_watts_std": bio_watts_std,
-        "standing_baseline_w": standing_baseline,
-        "net_bio_cost_w": net_bio_watts,
-        "net_bio_cost_std_w": bio_watts_std,
-        "mechanical_power": est_mech_watts,
-        "mechanical_power_std": mech_power_std,
-        "mechanical_power_no_achilles": est_mech_watts_no_achilles,
-        "mechanical_power_no_achilles_std": mech_power_no_ach_std,
-        "exo_power": exo_power_net,
-        "exo_power_std": text_exo_power_std,
-        "ref_mus_pos_power_w": j_pos_ref / mean_stride_dur,
-        "ref_mus_neg_power_w": j_neg_ref / mean_stride_dur,
-        "con_mus_pos_power_w": j_pos_con / mean_stride_dur,
-        "con_mus_neg_power_w": j_neg_con / mean_stride_dur,
-        "ref_ach_pos_power_w": j_pos_ref_ach / mean_stride_dur,
-        "ref_ach_neg_power_w": j_neg_ref_ach / mean_stride_dur,
-        "con_ach_pos_power_w": j_pos_con_ach / mean_stride_dur,
-        "con_ach_neg_power_w": j_neg_con_ach / mean_stride_dur,
+        "bio_watts_per_kg": bio_watts,
+        "standing_baseline_w_per_kg": standing_baseline,
+        "net_bio_cost_w_per_kg": net_bio_watts,
+        "mechanical_power_per_kg": est_mech_watts,
+        "mechanical_power_std_per_kg": mech_power_std,
+        "mechanical_power_no_achilles_per_kg": est_mech_watts_no_achilles,
+        "mechanical_power_no_achilles_std_per_kg": mech_power_no_ach_std,
+        "exo_power_per_kg": exo_power_net,
+        "exo_power_std_per_kg": text_exo_power_std,
+        "ref_mus_pos_power_w_per_kg": j_pos_ref / mean_stride_dur,
+        "ref_mus_neg_power_w_per_kg": j_neg_ref / mean_stride_dur,
+        "con_mus_pos_power_w_per_kg": j_pos_con / mean_stride_dur,
+        "con_mus_neg_power_w_per_kg": j_neg_con / mean_stride_dur,
+        "ref_ach_pos_power_w_per_kg": j_pos_ref_ach / mean_stride_dur,
+        "ref_ach_neg_power_w_per_kg": j_neg_ref_ach / mean_stride_dur,
+        "con_ach_pos_power_w_per_kg": j_pos_con_ach / mean_stride_dur,
+        "con_ach_neg_power_w_per_kg": j_neg_con_ach / mean_stride_dur,
     }
 
     for i in range(100):
-        # Full Hum/Sys averages for regression
+        # Full Hum/Sys averages for regression (all values are normalized per kg)
         row[f"ref_hum_w_{i:02d}"] = ref_hum_mean[i]
         row[f"con_hum_w_{i:02d}"] = con_hum_mean[i]
         row[f"ref_sys_w_{i:02d}"] = ref_sys_mean[i]
@@ -534,6 +542,17 @@ def compile_clean_window_row(
         row[f"con_exo_std_{i:02d}"] = con_exo_std[i]
         row[f"con_ach_std_{i:02d}"] = con_ach_std[i]
         row[f"con_mus_std_{i:02d}"] = con_mus_std[i]
+        
+        # Position and Torque columns added
+        row[f"ref_pos_w_{i:02d}"] = ref_pos_mean[i]
+        row[f"con_pos_w_{i:02d}"] = con_pos_mean[i]
+        row[f"ref_tau_w_{i:02d}"] = ref_tau_mean[i]
+        row[f"con_tau_w_{i:02d}"] = con_tau_mean[i]
+        
+        row[f"ref_pos_std_{i:02d}"] = ref_pos_std[i]
+        row[f"con_pos_std_{i:02d}"] = con_pos_std[i]
+        row[f"ref_tau_std_{i:02d}"] = ref_tau_std[i]
+        row[f"con_tau_std_{i:02d}"] = con_tau_std[i]
 
         row[f"com_x_w_{i:02d}"] = com_x_centered[i]
         row[f"com_y_w_{i:02d}"] = com_y_centered[i]
@@ -568,6 +587,9 @@ def process_trial(df, left_body, right_body, trial_name, window_s, min_window_s)
     velL_vals = df["velaL"].values if "velaL" in df.columns else np.zeros(len(df))
     tauR_vals = df["tauR"].values if "tauR" in df.columns else np.zeros(len(df))
     velR_vals = df["velaR"].values if "velaR" in df.columns else np.zeros(len(df))
+    
+    posaL_vals = df["posaL"].values if "posaL" in df.columns else np.zeros(len(df))
+    posaR_vals = df["posaR"].values if "posaR" in df.columns else np.zeros(len(df))
 
     # --- 1. Compute State-Machine Clean Gait Heuristics ---
     gait_filter = CleanGaitFilter(contact_threshold=1.0)
@@ -577,7 +599,7 @@ def process_trial(df, left_body, right_body, trial_name, window_s, min_window_s)
 
     clean_indices = np.where(clean_mask)[0]
     if len(clean_indices) == 0:
-        return []
+        return [ ]
 
     first_clean_idx = clean_indices[0]
     last_clean_idx = clean_indices[-1]
@@ -587,23 +609,30 @@ def process_trial(df, left_body, right_body, trial_name, window_s, min_window_s)
     true_duration = t_last - t_first
 
     if true_duration < min_window_s:
-        return []
+        return [ ]
 
     # --- 2. Extract Whole Clean Gait Cycles ---
     clean_cycles = find_clean_cycles(blocks, times)
     if not clean_cycles:
-        return []
+        return [ ]
 
-    # --- 3. Run COM filter from frame 0 for convergence ---
+    # --- Noise Rejected Mass Calculation ---
     f_total_y = left_forces[:, 1] + right_forces[:, 1]
     active_fy = f_total_y[f_total_y > 50.0]
-    calc_mass = np.mean(active_fy) / 9.81 if len(active_fy) > 0 else 70.0
+    if len(active_fy) > 100:
+        # Strip upper and lower 5% to drop irregular steps/partial weight-bearing
+        p5 = np.percentile(active_fy, 5)
+        p95 = np.percentile(active_fy, 95)
+        clean_fy = active_fy[(active_fy >= p5) & (active_fy <= p95)]
+        calc_mass = np.mean(clean_fy) / 9.81 if len(clean_fy) > 0 else 70.0
+    else:
+        calc_mass = np.mean(active_fy) / 9.81 if len(active_fy) > 0 else 70.0
 
     analyzer = EnergyAnalyzer(
         initial_mass=calc_mass, foot_roll_length=0.254, override_belt_speed=1.25
     )
 
-    inst_records = []
+    inst_records = [ ]
 
     for i in range(last_clean_idx + 1):
         t = times[i]
@@ -621,22 +650,27 @@ def process_trial(df, left_body, right_body, trial_name, window_s, min_window_s)
             is_clean=clean_mask[i],
         )
 
+        # Scale records per kg (where appropriate). Position is inherently not mass-related.
         inst_records.append(
             {
                 "com_x": res["com_pos"][0],
                 "com_y": res["com_pos"][1],
                 "com_z": res["com_pos"][2],
-                "ref_exo": tauL_vals[i] * velL_vals[i],
-                "contra_exo": tauR_vals[i] * velR_vals[i],
-                "ref_hum": res["hum_left"],
-                "contra_hum": res["hum_right"],
-                "ref_sys": res["sys_left"],
-                "contra_sys": res["sys_right"],
+                "ref_exo": (tauL_vals[i] * velL_vals[i]) / calc_mass,
+                "contra_exo": (tauR_vals[i] * velR_vals[i]) / calc_mass,
+                "ref_hum": res["hum_left"] / calc_mass,
+                "contra_hum": res["hum_right"] / calc_mass,
+                "ref_sys": res["sys_left"] / calc_mass,
+                "contra_sys": res["sys_right"] / calc_mass,
+                "ref_pos": posaL_vals[i],
+                "contra_pos": posaR_vals[i],
+                "ref_tau": tauL_vals[i] / calc_mass,
+                "contra_tau": tauR_vals[i] / calc_mass,
             }
         )
 
     # --- 4. Process Sequential 5-Minute Windows ---
-    rows = []
+    rows = [ ]
     current_window_start = t_first
 
     while current_window_start + window_s <= t_last:
@@ -660,6 +694,7 @@ def process_trial(df, left_body, right_body, trial_name, window_s, min_window_s)
                 times,
                 trial_name,
                 current_window_start,
+                calc_mass
             )
             if row:
                 rows.append(row)
@@ -689,6 +724,7 @@ def process_trial(df, left_body, right_body, trial_name, window_s, min_window_s)
                 times,
                 trial_name,
                 current_window_start,
+                calc_mass
             )
             if row:
                 rows.append(row)
@@ -787,7 +823,7 @@ def main():
     files = glob.glob(os.path.join(os.path.abspath(args.dir), "*.parquet"))
     files = [f for f in files if "precomputed_poggensee" not in f]
 
-    files_to_process = []
+    files_to_process = [ ]
     for f in sorted(files):
         t_name = os.path.splitext(os.path.basename(f))[0]
         if t_name not in processed_trials and t_name not in skipped_trials:
