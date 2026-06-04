@@ -3,6 +3,7 @@
 use glob::glob;
 use nalgebra::Vector3;
 use polars::prelude::*;
+use rayon::prelude::*;
 use std::path::PathBuf;
 
 use treadmill_analyze::energy_analyzer::EnergyAnalyzer;
@@ -41,19 +42,18 @@ struct BreathRecord {
 // Explicitly casts the column to Float64 to handle Pandas integer optimizations.
 fn get_f64_vec(df: &DataFrame, name: &str, len: usize) -> Vec<f64> {
     if let Ok(series) = df.column(name) {
-        // Force cast to Float64 (handles integers, booleans, and nulls smoothly)
         if let Ok(casted_series) = series.cast(&DataType::Float64) {
             if let Ok(ca) = casted_series.f64() {
                 return ca.into_iter().map(|opt| opt.unwrap_or(0.0)).collect();
             }
         }
     }
-    // Fallback if column is entirely missing
     vec![0.0; len]
 }
 
 fn process_trial(file_path: &PathBuf) -> (Vec<StrideRecord>, Vec<BreathRecord>) {
     let file_name = file_path.file_stem().unwrap().to_string_lossy().to_string();
+    println!("Processing: {}", file_name);
 
     let file = std::fs::File::open(file_path).unwrap();
     let df = ParquetReader::new(file).finish().unwrap();
@@ -149,7 +149,6 @@ fn process_trial(file_path: &PathBuf) -> (Vec<StrideRecord>, Vec<BreathRecord>) 
         let l_is_active = analyzer.stride_analyzer.left.is_active.unwrap_or(false);
         let r_is_active = analyzer.stride_analyzer.right.is_active.unwrap_or(false);
 
-        // Extract Left Stride on Heel Strike
         if l_is_active && !l_was_active {
             if let Some(start_idx) = last_l_strike_idx {
                 let end_idx = i;
@@ -184,7 +183,6 @@ fn process_trial(file_path: &PathBuf) -> (Vec<StrideRecord>, Vec<BreathRecord>) 
             last_l_strike_idx = Some(i);
         }
 
-        // Extract Right Stride on Heel Strike
         if r_is_active && !r_was_active {
             if let Some(start_idx) = last_r_strike_idx {
                 let end_idx = i;
@@ -219,7 +217,6 @@ fn process_trial(file_path: &PathBuf) -> (Vec<StrideRecord>, Vec<BreathRecord>) 
             last_r_strike_idx = Some(i);
         }
 
-        // Process Breaths (Only when vo2 values physically update)
         if i > 0 && vo2[i] > 0.0 && (vo2[i] - vo2[i - 1]).abs() > 1e-3 {
             let v = vo2[i];
             let c = vco2[i];
@@ -228,14 +225,12 @@ fn process_trial(file_path: &PathBuf) -> (Vec<StrideRecord>, Vec<BreathRecord>) 
             let gross_watts = ((3.941 * v) + (1.106 * c)) * 4.184 / 60.0;
             let net_watts = gross_watts - qs_baseline[i];
 
-            // Primary validity checks
             let physio_valid = v > 200.0 && rer >= 0.72 && rer <= 1.05;
 
             if !physio_valid {
                 last_invalid_breath_time = t;
             }
 
-            // Washout filter (hangover of 60 seconds after a break)
             let is_valid = physio_valid && (t - last_invalid_breath_time > 60.0);
 
             breaths.push(BreathRecord {
@@ -255,27 +250,43 @@ fn process_trial(file_path: &PathBuf) -> (Vec<StrideRecord>, Vec<BreathRecord>) 
 }
 
 fn main() {
+    // 1. Force Polars to be strictly single-threaded internally.
+    // This stops it from triggering Rayon's recursive work-stealing bug.
+    std::env::set_var("POLARS_MAX_THREADS", "1");
+
+    // 2. Build the global thread pool to strictly 6 threads.
+    // This caps RAM usage so the OS doesn't thrash to the swap file.
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(6)
+        .stack_size(8 * 1024 * 1024) // 8MB to be perfectly safe
+        .build_global()
+        .unwrap();
+
     println!("Finding parquet files...");
     let files: Vec<PathBuf> = glob("../exported_pogensee/*.parquet")
         .unwrap()
         .filter_map(Result::ok)
         .filter(|p| {
-            !p.to_string_lossy().contains("precomputed_poggensee")
-                && !p.to_string_lossy().contains("_strides")
-                && !p.to_string_lossy().contains("_breaths")
+            let name = p.to_string_lossy();
+            !name.contains("precomputed_poggensee")
+                    && !name.contains("strides.parquet") // Fixed
+                    && !name.contains("breaths.parquet") // Fixed
         })
         .collect();
 
-    println!("Processing {} trials sequentially...", files.len());
+    println!(
+        "Processing {} trials using 6 parallel threads...",
+        files.len()
+    );
+
+    // Map over the files in parallel using the limited thread pool
+    let results: Vec<(Vec<StrideRecord>, Vec<BreathRecord>)> =
+        files.par_iter().map(|f| process_trial(f)).collect();
 
     let mut all_strides = Vec::new();
     let mut all_breaths = Vec::new();
 
-    for (i, f) in files.iter().enumerate() {
-        let file_name = f.file_stem().unwrap().to_string_lossy();
-        println!("[{}/{}] Processing: {}", i + 1, files.len(), file_name);
-
-        let (s, b) = process_trial(f);
+    for (s, b) in results {
         all_strides.extend(s);
         all_breaths.extend(b);
     }
