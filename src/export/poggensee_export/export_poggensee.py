@@ -198,8 +198,6 @@ def optimize_offsets(raw_signals, max_fz_adjust=5.0, contact_thresh=30.0):
         mean_R_SS = np.mean(zeroed_forced["R"]["Fz"][R_SS_mask])
 
         difference_fz = mean_L_SS - mean_R_SS
-        # f_z_adjust_L = np.clip(difference_fz / 2.0, -max_fz_adjust, max_fz_adjust)
-        # f_z_adjust_R = np.clip(-difference_fz / 2.0, -max_fz_adjust, max_fz_adjust)
         f_z_adjust_L = difference_fz / 2.0
         f_z_adjust_R = -difference_fz / 2.0
 
@@ -233,68 +231,19 @@ def optimize_offsets(raw_signals, max_fz_adjust=5.0, contact_thresh=30.0):
     )
 
 
-def calculate_qs_baseline(file_path):
-    """Loads a QS .mat file and extracts the average metabolic Watts."""
-    try:
-        mat_data, is_v73 = load_mat_file(file_path)
-        keys = list(mat_data.keys())
+def export_trial(file_path, input_dir, output_dir):
+    """Translates a single Pogensee .mat file to a transformed Parquet file."""
+    rel_path = os.path.relpath(file_path, input_dir)
+    rel_path_no_ext = os.path.splitext(rel_path)[0]
+    safe_name = (
+        rel_path_no_ext.replace(os.sep, "_")
+        .replace("/", "_")
+        .replace("\\", "_")
+        .replace(" ", "_")
+    )
+    out_file_path = os.path.join(output_dir, f"{safe_name}.parquet")
 
-        vo2_key = next((k for k in keys if k.lower() == "vo2"), None)
-        vco2_key = next((k for k in keys if k.lower() == "vco2"), None)
-
-        if vo2_key:
-            vo2 = get_array(mat_data, vo2_key, is_v73)
-            vo2 = vo2[(~np.isnan(vo2)) & (vo2 > 0)]
-
-            if len(vo2) > 0:
-                vo2_mean = np.nanmean(vo2)
-
-                if vco2_key:
-                    vco2 = get_array(mat_data, vco2_key, is_v73)
-                    vco2 = vco2[(~np.isnan(vco2)) & (vco2 > 0)]
-                    vco2_mean = np.nanmean(vco2) if len(vco2) > 0 else 0.85 * vo2_mean
-                else:
-                    vco2_mean = 0.85 * vo2_mean
-
-                # Convert to Watts
-                cal_per_min = 3.941 * vo2_mean + 1.106 * vco2_mean
-                bio_watts = cal_per_min * 4.184 / 60.0
-
-                if is_v73:
-                    mat_data.close()
-                return bio_watts
-
-        if is_v73:
-            mat_data.close()
-        return None
-    except Exception as e:
-        print(f"    Failed to extract baseline from {file_path}: {e}")
-        return None
-
-
-def get_best_qs_match(target_path, qs_baselines):
-    """Finds the QS file that shares the longest common directory path with the target."""
-    if not qs_baselines:
-        return None, None
-
-    best_qs = None
-    max_prefix_len = -1
-
-    for qs_path in qs_baselines.keys():
-        prefix = os.path.commonprefix([target_path, qs_path])
-        if len(prefix) > max_prefix_len:
-            max_prefix_len = len(prefix)
-            best_qs = qs_path
-
-    return best_qs, qs_baselines[best_qs] if best_qs else None
-
-
-def export_trial(
-    file_path, input_dir, output_dir, baseline_w=None, matched_qs_path=None
-):
-    """Translates a single Pogensee .mat file to a transformed, zero-corrected Parquet file."""
-    rel_path_for_display = os.path.relpath(file_path, input_dir)
-    print(f"\n  Processing: {rel_path_for_display}")
+    print(f"\n  Processing: {rel_path}")
 
     try:
         mat_data, is_v73 = load_mat_file(file_path)
@@ -302,7 +251,34 @@ def export_trial(
         print(f"    Skipping {file_path}: Unable to parse mat file structure. {e}")
         return
 
-    # Extract raw force, torque, and temporal arrays
+    # Check if this is a Quiet Standing (QS) baseline trial
+    is_qs = "QS" in os.path.basename(file_path)
+
+    if is_qs:
+        # Simple export path for Quiet Standing trials: copy temporal, metabolic and auxiliary data
+        try:
+            df = pd.DataFrame()
+            df["frame"] = np.arange(len(get_array(mat_data, "time", is_v73)))
+            df["time"] = get_array(mat_data, "time", is_v73)
+
+            source_keys = list(mat_data.keys())
+            for key in source_keys:
+                if not key.startswith("_") and key != "time":
+                    try:
+                        df[key] = get_array(mat_data, key, is_v73)
+                    except Exception as e:
+                        pass
+
+            df.to_parquet(out_file_path, index=False)
+            print(f"    Saved QS Parquet -> {out_file_path}")
+        except Exception as e:
+            print(f"    Error exporting QS trial {file_path}: {e}")
+        finally:
+            if is_v73:
+                mat_data.close()
+        return
+
+    # Extract raw force, torque, and temporal arrays for active trials
     try:
         raw_signals = {
             "L": {
@@ -392,13 +368,6 @@ def export_trial(
     df["frame"] = np.arange(len(raw_signals["time"]))
     df["time"] = raw_signals["time"]
 
-    # Insert Dynamic Quiet Standing (QS) baseline if found
-    if baseline_w is not None:
-        df["qs_baseline_w"] = baseline_w
-        print(
-            f"    Applied QS Baseline: {baseline_w:.1f} W (Matched: {os.path.basename(matched_qs_path)})"
-        )
-
     # Map Left Foot GRF and CoP to global (Y-up, right-handed system)
     df["calcn_l_force_x"] = -LFy_clean
     df["calcn_l_force_y"] = LFz_clean
@@ -470,19 +439,6 @@ def export_trial(
     if is_v73:
         mat_data.close()
 
-    # Create safe unique filename based on folder path
-    rel_path = os.path.relpath(file_path, input_dir)
-    rel_path_no_ext = os.path.splitext(rel_path)[0]
-
-    # Replace slashes, backslashes, and spaces with underscores
-    safe_name = (
-        rel_path_no_ext.replace(os.sep, "_")
-        .replace("/", "_")
-        .replace("\\", "_")
-        .replace(" ", "_")
-    )
-    out_file_path = os.path.join(output_dir, f"{safe_name}.parquet")
-
     df.to_parquet(out_file_path, index=False)
     print(f"    Saved Parquet -> {out_file_path}")
 
@@ -527,31 +483,17 @@ def main():
                 else:
                     mat_files.append(full_path)
 
-    if not mat_files:
-        print(f"No active trial .mat files found in: {input_dir}")
+    if not mat_files and not qs_files:
+        print(f"No trial .mat files found in: {input_dir}")
         return
 
     print(
         f"Found {len(mat_files)} active trial file(s) and {len(qs_files)} QS file(s)."
     )
 
-    # Extract baselines from QS files
-    print("\nExtracting baselines from Quiet Standing (QS) trials...")
-    qs_baselines = {}
-    for qs_file in qs_files:
-        baseline = calculate_qs_baseline(qs_file)
-        if baseline is not None:
-            qs_baselines[qs_file] = baseline
-            print(
-                f"  -> Extracted baseline: {baseline:.1f} W from {os.path.basename(qs_file)}"
-            )
-        else:
-            print(f"  -> No valid metabolic data in {os.path.basename(qs_file)}")
-
     print("\nBeginning export processing...")
-    for file_path in sorted(mat_files):
-        best_qs_path, baseline_w = get_best_qs_match(file_path, qs_baselines)
-        export_trial(file_path, input_dir, output_dir, baseline_w, best_qs_path)
+    for file_path in sorted(mat_files + qs_files):
+        export_trial(file_path, input_dir, output_dir)
 
     print("\nExport process completed.")
 
