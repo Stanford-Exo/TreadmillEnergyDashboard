@@ -108,3 +108,32 @@ We can use this method to analyze the giant dataset that Katie Poggensee collect
 If you download the data, and put it into a folder, you can have an LLM edit the `export_poggensee.py` script to point to your folder path, then run `make export-poggensee` to turn the raw .mat files into .parquet files, and then run `make preprocess-poggensee` to run the (slower) COM integration and energy estimates and stride-based filtering. Then you can run `make correlate-metabolics` and `make animate-poggensee` to create the plots/GIFs.
 
 There was a follow-up paper analyzing the data by Sabrina Abrams and Katie, "General variability leads to specific adaptation toward optimal movement policies", (https://www.cell.com/current-biology/fulltext/S0960-9822(22)00584-X?uuid=uuid%3A8c09cf14-9708-4ada-bc00-597bee5133d5), Their takeaway was: "We analyzed four variables that spanned the levels of the whole movement, the joint, and the muscle: step frequency, ankle angle range, total soleus activity, and total medial gastrocnemius activity. We found that, across all of these analyzed variables, variability increased upon initial exposure to new contexts and then decreased with experience. This led to adaptive changes in the magnitude of specific variables, and these changes were correlated with reduced energetic cost. The timescales by which adaptive changes progressed and variability decreased were faster for some variables than others, suggesting a reduced search space within which the nervous system continues to optimize its policy. These collective findings support the principle that exploration through general variability leads to specific adaptation toward optimal movement policies."
+
+## Robust Data Filtering Heuristics
+
+Metabolic and biomechanical data gathered over long adaptation trials are naturally prone to outliers, transient kinetics, mask leaks, and stumbles. To ensure that regressions and mechanical correlation coefficients remain accurate, the pipeline applies a strict, multi-layered filtration algorithm to every frame of data before accepting it into a 5-minute analysis window.
+
+### 1. Metabolic Gas Exchange Heuristics (Breath-by-Breath)
+Because indirect calorimetry systems evaluate air sampled from a breathing mask, they are highly sensitive to leaks, hyperventilation, and talking. The pipeline evaluates the physiological validity of every sample:
+
+* **Respiratory Exchange Ratio (RER) Bounds:** The RER is defined as `VCO2 / VO2`. Physiologically, humans can only sustain an RER between ~0.70 (burning 100% fat) and 1.0 (burning 100% carbohydrates) during steady-state exercise. Any frame where RER drops below `0.72` or exceeds `1.05` is instantly flagged as broken (indicating a mask leak or hyperventilation/talking, respectively).
+* **Absolute Volume Floor:** Any frame where absolute `VO2` consumption falls below `200.0 mL/min` is flagged as physically impossible for an active adult, indicating the mask has slipped or broken its seal.
+* **60-Second "Washout" Mask (Hangover Filter):** If the mask seal breaks, room air fills the plastic hosing and the machine's mixing chamber. Even after the mask is fixed, it takes ~10–15 breaths for the participant to flush the "dead space" air out of the system. Therefore, any frame flagged as broken by the rules above acts as a trigger that immediately invalidates the subsequent **60 seconds (6,000 frames)** of metabolic data to allow for proper equilibration and washout.
+* **Robust Averages (Median):** To prevent surviving transient spikes from dragging the 5-minute average upward, the pipeline computes the baseline metabolic cost of the window using the **Median** rather than the Mean.
+
+### 2. Mechanical Ground Reaction Force (GRF) Heuristics
+Because the participant is walking on an instrumented split-belt treadmill, we evaluate the vertical ground reaction forces to verify that they are performing clean, steady-state gait.
+
+* **Contact Threshold:** A foot is defined as "in contact" with the ground when the vertical force exceeds `30 N`.
+* **State Machine Boundaries:** Gait is segmented chronologically into Flight, Left Single Support (LSS), Right Single Support (RSS), and Double Support (DS). 
+* **Duration Constraints:** 
+  * Single Support phases must last between `0.15s` and `0.60s`.
+  * Double Support phases must last between `0.03s` and `0.35s`. 
+  * Any step falling outside these temporal bounds (due to stumbles, scuffs, or crossovers) is discarded.
+* **Neighborhood Consensus:** A single clean step is not enough to guarantee steady mechanical work. The pipeline requires that a step be surrounded by at least two perfectly valid gait cycles before and after it to be accepted into the mechanical aggregation.
+
+### 3. Windowing & Aggregation Heuristics
+Once the individual frames are vetted, the pipeline attempts to divide the trial chronologically into discrete, 5-minute evaluation windows. The entire 5-minute window is evaluated for overall quality, and discarded entirely if it fails to meet:
+
+* **The Yield Check:** If mask leaks, talking, or stumbles caused too many frames to be discarded by the filters above, the window's sample size becomes unreliable. A window must retain at least **60% valid metabolic data** across its 5-minute span. If the yield drops below 60%, the entire 5-minute block is tossed.
+* **The Power Floor Check:** We calculate the Gross Biological Power in Watts. We then subtract the participant's individual Quiet Standing (QS) baseline. Walking must physically cost more energy than standing perfectly still. If the calculated *Net Biological Cost* of the window is `< 30 Watts`, we flag the window as suffering from an undetected, systemic mask dilution leak and toss it.

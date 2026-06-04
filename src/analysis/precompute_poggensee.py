@@ -145,7 +145,7 @@ class CleanGaitFilter:
         states[l_contact & ~r_contact] = 1  # LSS
         states[~l_contact & r_contact] = 2  # RSS
         states[l_contact & r_contact] = 3  # DS
-        states[~l_contact & ~r_contact] = 0  # None
+        states[~l_contact & ~r_contact] = 0  # None/Flight
 
         diff = np.diff(states)
         change_indices = np.where(diff != 0)[0] + 1
@@ -296,30 +296,74 @@ def compile_clean_window_row(
     if not vo2_col:
         return None
 
-    # Calculate row-by-row metabolic cost to compute variance across the window
-    vo2_series = df_win[vo2_col].replace(0, np.nan)
-    vco2_series = df_win[vco2_col].replace(0, np.nan) if vco2_col else 0.85 * vo2_series
-    row_bio_watts = (3.941 * vo2_series + 1.106 * vco2_series) * 4.184 / 60.0
-    row_bio_watts = row_bio_watts.dropna()
+    # --- METABOLIC HEURISTICS IMPLEMENTATION ---
+    vo2_raw = df_win[vo2_col]
+    vco2_raw = df_win[vco2_col] if vco2_col else 0.85 * vo2_raw
 
-    vo2_mean = vo2_series.dropna().mean()
+    # 1. Safely calculate RER
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rer = np.where(vo2_raw > 0, vco2_raw / vo2_raw, 0)
+
+    # 2. Identify moments where the system breaks (leaks, coughing, talking)
+    # Using pandas Series to allow rolling operations
+    is_physiologically_broken = pd.Series(
+        (rer < 0.72) | (rer > 1.05) | (vo2_raw < 200.0)
+    )
+
+    # 3. Apply the 60-second Washout (Hangover) Mask
+    # Data is 100Hz, so 60 seconds = 6000 frames.
+    # rolling().max() carries a 'True' (broken) forward for 60 seconds.
+    is_broken_or_recovering = (
+        is_physiologically_broken.rolling(window=6000, min_periods=1).max().astype(bool)
+    )
+
+    # 4. Final valid frame mask
+    valid_mask = (vo2_raw > 0) & (~np.isnan(vo2_raw)) & (~is_broken_or_recovering)
+
+    vo2_clean = vo2_raw[valid_mask]
+    vco2_clean = vco2_raw[valid_mask]
+
+    # Calculate row-by-row metabolic cost strictly for standard deviation tracking
+    row_bio_watts = ((3.941 * vo2_clean) + (1.106 * vco2_clean)) * 4.184 / 60.0
+    bio_watts_std = float(row_bio_watts.std()) if len(row_bio_watts) > 1 else 0.0
+
+    total_breath_frames = (vo2_raw > 0).sum()
+    if total_breath_frames < 20:
+        return None
+
+    # HEURISTIC A: The Yield Check
+    # If <60% of the active frames survive the validity and washout filter, discard the whole 5 min window
+    valid_yield = len(vo2_clean) / total_breath_frames if total_breath_frames > 0 else 0
+    if valid_yield < 0.60:
+        print(
+            f"    -> Dropping Window [{window_start_s:.1f}s]: Excessive noise/leaks/washout (Yield: {valid_yield:.1%})"
+        )
+        return None
+
+    # Robust Average: Use median to ignore any transient edges
+    vo2_mean = vo2_clean.median()
+    vco2_mean = vco2_clean.median()
+
     if pd.isna(vo2_mean) or vo2_mean <= 0:
         return None
 
-    vco2_mean = (
-        df_win[vco2_col].replace(0, np.nan).dropna().mean()
-        if vco2_col
-        else 0.85 * vo2_mean
-    )
     cal_per_min = 3.941 * vo2_mean + 1.106 * vco2_mean
     bio_watts = cal_per_min * 4.184 / 60.0
-    bio_watts_std = float(row_bio_watts.std()) if len(row_bio_watts) > 1 else 0.0
 
     standing_baseline = (
         df_win["qs_baseline_w"].iloc[0] if "qs_baseline_w" in df_win.columns else 70.0
     )
     net_bio_watts = bio_watts - standing_baseline
 
+    # HEURISTIC B: The Power Floor Check
+    # Walking must cost significantly more than standing. If Net Cost < 30W, the mask is leaking heavily.
+    if net_bio_watts < 30.0:
+        print(
+            f"    -> Dropping Window [{window_start_s:.1f}s]: Impossible energy cost ({net_bio_watts:.1f}W net). Suspected leak."
+        )
+        return None
+
+    # --- MECHANICAL STRIDE AGGREGATION ---
     cycles_durs = [c["stride_dur"] for c in window_cycles]
     cycles_dfs = [c["duty_factor"] for c in window_cycles]
 
@@ -422,7 +466,6 @@ def compile_clean_window_row(
         + (4 * j_pos_con_raw + 1 * j_neg_con_raw)
     ) / mean_stride_dur
 
-    # Integrate Achilles components
     j_pos_ref_ach = np.trapz(np.maximum(ref_ach_mean, 0), dx=dt_stride)
     j_neg_ref_ach = abs(np.trapz(np.minimum(ref_ach_mean, 0), dx=dt_stride))
     j_pos_con_ach = np.trapz(np.maximum(con_ach_mean, 0), dx=dt_stride)

@@ -1,9 +1,10 @@
-# File: src/analysis/plot_gait_time_domain_metabolics.py
+# File: src/analysis/plot_gait_time_domain.py
 
 import argparse
 import os
 import sys
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
@@ -11,13 +12,6 @@ import pandas as pd
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "../../"))
 DEFAULT_DIR = os.path.join(REPO_ROOT, "exported_pogensee")
-DEFAULT_FILE = "Continued_Optimization_1_adaptation_Day2_ADAPT1.parquet"
-
-try:
-    import matplotlib.pyplot as plt
-except ImportError:
-    print("Error: matplotlib is required for time-domain plotting.")
-    sys.exit(1)
 
 # --- Aesthetic Styling (Muted Notion/Tufte Style) ---
 plt.rcParams["font.family"] = "sans-serif"
@@ -28,11 +22,14 @@ NOTION_TEXT = "#37352F"
 NOTION_SUBTEXT = "#787774"
 NOTION_GRID = "#EDEDED"
 
-COLOR_LEFT = "#EF4444"  # Soft Red for Left Foot
-COLOR_RIGHT = "#3B82F6"  # Soft Blue for Right Foot
-COLOR_VO2 = "#10B981"  # Emerald for VO2
-COLOR_VCO2 = "#8B5CF6"  # Purple for VCO2
+COLOR_LEFT = "#EF4444"  # Soft Red
+COLOR_RIGHT = "#3B82F6"  # Soft Blue
+COLOR_VO2 = "#10B981"  # Emerald
+COLOR_VCO2 = "#8B5CF6"  # Purple
+COLOR_RER = "#F59E0B"  # Amber
+COLOR_WATTS = "#EF4444"  # Red for Power
 COLOR_CLEAN_BG = "#D1FAE5"  # Pastel green for allowed gait patches
+COLOR_INVALID_BG = "#FEE2E2"  # Pastel red for rejected chunks
 
 
 class CleanGaitFilter:
@@ -48,10 +45,10 @@ class CleanGaitFilter:
         r_contact = r_force > self.contact_threshold
 
         states = np.zeros(len(df), dtype=int)
-        states[l_contact & ~r_contact] = 1  # Left Single Support (LSS)
-        states[~l_contact & r_contact] = 2  # Right Single Support (RSS)
-        states[l_contact & r_contact] = 3  # Double Support (DS)
-        states[~l_contact & ~r_contact] = 0  # None/Flight
+        states[l_contact & ~r_contact] = 1  # LSS
+        states[~l_contact & r_contact] = 2  # RSS
+        states[l_contact & r_contact] = 3  # DS
+        states[~l_contact & ~r_contact] = 0  # Flight
 
         diff = np.diff(states)
         change_indices = np.where(diff != 0)[0] + 1
@@ -90,7 +87,6 @@ class CleanGaitFilter:
         for i in range(2, num_blocks - 2):
             if not blocks[i]["valid"]:
                 continue
-
             current_state = blocks[i]["state"]
             next_state = blocks[i + 1]["state"]
             prev_state = blocks[i - 1]["state"]
@@ -113,138 +109,150 @@ class CleanGaitFilter:
         for i in range(num_blocks):
             start_check = max(0, i - neighbor_consensus)
             end_check = min(num_blocks, i + neighbor_consensus + 1)
-
-            is_neighborhood_clean = all(
-                blocks[j]["valid"] for j in range(start_check, end_check)
-            )
-
-            if is_neighborhood_clean:
-                ds_durs = [
-                    blocks[j]["duration"]
-                    for j in range(start_check, end_check)
-                    if blocks[j]["state"] == 3
-                ]
-                ss_durs = [
-                    blocks[j]["duration"]
-                    for j in range(start_check, end_check)
-                    if blocks[j]["state"] in [1, 2]
-                ]
-
-                if len(ds_durs) > 1 and np.std(ds_durs) > 0.03:
-                    continue
-                if len(ss_durs) > 1 and np.std(ss_durs) > 0.04:
-                    continue
-
+            if all(blocks[j]["valid"] for j in range(start_check, end_check)):
                 b = blocks[i]
                 clean_mask[b["start_idx"] : b["end_idx"]] = True
-
         return clean_mask
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Plot Ground Reaction Forces along with temporal VO2/VCO2 breath dynamics."
+        description="Plot Time-Domain Gait & Metabolic Heuristics."
     )
     parser.add_argument(
-        "--file",
-        type=str,
-        default=os.path.join(DEFAULT_DIR, DEFAULT_FILE),
-        help="Path to the specific parquet trial file",
+        "--file", type=str, required=True, help="Path to the parquet trial file"
     )
     parser.add_argument(
-        "--threshold",
-        type=float,
-        default=30.0,
-        help="Vertical force contact threshold in Newtons (default: 30.0 N)",
-    )
-    parser.add_argument(
-        "--start",
-        type=float,
-        default=None,
-        help="Start time in seconds (defaults to full trial start)",
-    )
-    parser.add_argument(
-        "--duration",
-        type=float,
-        default=None,
-        help="Duration in seconds (defaults to full trial duration)",
+        "--threshold", type=float, default=30.0, help="Vertical force threshold (N)"
     )
     args = parser.parse_args()
 
     file_path = os.path.abspath(args.file)
     if not os.path.exists(file_path):
-        print(f"Error: Could not find parquet file at {file_path}")
+        print(f"Error: File not found at {file_path}")
         sys.exit(1)
 
     print(f"Loading {os.path.basename(file_path)}...")
     df = pd.read_parquet(file_path)
 
-    time_all = df["time"].values
-    l_force_all = df["calcn_l_force_y"].values
-    r_force_all = df["calcn_r_force_y"].values
+    time = df["time"].values
+    l_force = df["calcn_l_force_y"].values
+    r_force = df["calcn_r_force_y"].values
 
-    # Detect respiratory columns
+    # Extract Baseline
+    qs_baseline = df["qs_baseline_w"].iloc[0] if "qs_baseline_w" in df.columns else 70.0
+
+    # 1. Base GRF clean mask
+    gait_filter = CleanGaitFilter(contact_threshold=args.threshold)
+    grf_clean_mask = gait_filter.identify_clean_frames(df, time, l_force, r_force)
+
     vo2_col = next((c for c in df.columns if c.lower() == "vo2"), None)
     vco2_col = next((c for c in df.columns if c.lower() == "vco2"), None)
+    has_metabolics = bool(vo2_col and vco2_col)
 
-    # Set temporal limits
-    t_min = time_all.min()
-    t_max = time_all.max()
+    frame_met_valid = np.ones(len(df), dtype=bool)
+    vo2_raw, vco2_raw, rer, watts = None, None, None, None
 
-    start_time = args.start if args.start is not None else t_min
-    duration = args.duration if args.duration is not None else (t_max - start_time)
-    end_time = min(start_time + duration, t_max)
+    if has_metabolics:
+        vo2_raw = df[vo2_col].values
+        vco2_raw = df[vco2_col].values
 
-    print(
-        f"Window configured from {start_time:.1f}s to {end_time:.1f}s (Total duration: {end_time - start_time:.1f}s)"
-    )
+        # Safe RER calculation
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rer = np.where(vo2_raw > 0, vco2_raw / vo2_raw, 0)
 
-    # Run clean gait segmentation
-    gait_filter = CleanGaitFilter(contact_threshold=args.threshold)
-    clean_mask_all = gait_filter.identify_clean_frames(
-        df, time_all, l_force_all, r_force_all, neighbor_consensus=2
-    )
+        watts = ((3.941 * vo2_raw) + (1.106 * vco2_raw)) * 4.184 / 60.0
 
-    # Filter arrays to the targeted window
-    window_mask = (df["time"] >= start_time) & (df["time"] <= end_time)
-    df_win = df[window_mask]
-    mask_win = clean_mask_all[window_mask]
+        # Heuristic 1 & 3: Frame-level metabolic validity
+        presence_mask = (vo2_raw > 0) & (vco2_raw > 0) & (~np.isnan(vo2_raw))
+        physio_mask = (rer >= 0.72) & (rer <= 1.05) & (vo2_raw > 200.0)
+        frame_met_valid = presence_mask & physio_mask
 
-    if df_win.empty:
-        print(
-            f"Error: No data remains in the time window {start_time}s to {end_time}s."
-        )
-        sys.exit(1)
+    # AND the GRF and Metabolic masks
+    combined_frame_mask = grf_clean_mask & frame_met_valid
 
-    time = df_win["time"].values
-    l_force = df_win["calcn_l_force_y"].values
-    r_force = df_win["calcn_r_force_y"].values
+    # --- CHUNKING & HEURISTICS 2, 4, 5 ---
+    chunk_duration = 300.0  # 5 minutes
+    final_valid_mask = np.zeros(len(df), dtype=bool)
 
-    l_contact = l_force > args.threshold
-    r_contact = r_force > args.threshold
-    l_ss = l_contact & ~r_contact
-    r_ss = r_contact & ~l_contact
+    t_min, t_max = time.min(), time.max()
+    chunk_edges = np.arange(t_min, t_max, chunk_duration)
+    if chunk_edges[-1] < t_max:
+        chunk_edges = np.append(chunk_edges, t_max)
 
-    # Setup subplot rows based on metabolic column availability
-    has_metabolics = (vo2_col is not None) and (df_win[vo2_col].dropna().sum() > 0)
-    num_subplots = 4 if has_metabolics else 3
+    chunk_status = []
 
+    for i in range(len(chunk_edges) - 1):
+        c_start = chunk_edges[i]
+        c_end = chunk_edges[i + 1]
+
+        # Allow trailing chunks >= 3 mins (180s)
+        if (c_end - c_start) < 180.0:
+            chunk_status.append((c_start, c_end, False, "Too Short"))
+            continue
+
+        idx_mask = (time >= c_start) & (time < c_end)
+        if not np.any(idx_mask):
+            continue
+
+        if has_metabolics:
+            # Heuristic 4: Yield check (must have > 60% valid metabolic frames)
+            chunk_presence = presence_mask[idx_mask]
+            chunk_valid = frame_met_valid[idx_mask]
+
+            # Yield = Valid Breaths / Total Breath frames in chunk
+            yield_pct = (
+                chunk_valid.sum() / len(chunk_valid) if len(chunk_valid) > 0 else 0
+            )
+
+            # Heuristic 5: Energy Floor
+            chunk_watts = watts[idx_mask]
+            valid_watts = chunk_watts[chunk_valid]
+
+            net_watts = 0
+            if len(valid_watts) > 0:
+                net_watts = np.median(valid_watts) - qs_baseline
+
+            is_valid_chunk = (yield_pct >= 0.60) and (net_watts >= 30.0)
+
+            if is_valid_chunk:
+                final_valid_mask[idx_mask] = combined_frame_mask[idx_mask]
+                chunk_status.append(
+                    (
+                        c_start,
+                        c_end,
+                        True,
+                        f"Yield: {yield_pct:.0%} | Net: {net_watts:.0f}W",
+                    )
+                )
+            else:
+                reason = (
+                    f"Low Yield: {yield_pct:.0%}"
+                    if yield_pct < 0.60
+                    else f"Low Pwr: {net_watts:.0f}W"
+                )
+                chunk_status.append((c_start, c_end, False, reason))
+        else:
+            # If no metabolics, just rely on GRF mask
+            final_valid_mask[idx_mask] = combined_frame_mask[idx_mask]
+            chunk_status.append((c_start, c_end, True, "GRF Only"))
+
+    # --- PLOTTING ---
+    num_subplots = 5 if has_metabolics else 2
     fig, axs = plt.subplots(
         num_subplots,
         1,
-        figsize=(12, 2.5 * num_subplots),
+        figsize=(15, 3 * num_subplots),
         sharex=True,
         facecolor=NOTION_BG,
     )
-
     if num_subplots == 1:
         axs = [axs]
 
     fig.suptitle(
-        f"Gait Signals & Gas Exchange Dynamics: {os.path.basename(file_path)}",
-        fontsize=13,
+        f"Heuristic Time-Domain Verification: {os.path.basename(file_path)}",
+        fontsize=14,
         fontweight="bold",
-        color=NOTION_TEXT,
         y=0.97,
     )
 
@@ -252,59 +260,33 @@ def main():
         ax.set_facecolor(NOTION_BG)
         for spine in ["top", "right"]:
             ax.spines[spine].set_visible(False)
-        for spine in ["bottom", "left"]:
-            ax.spines[spine].set_color(NOTION_TEXT)
-        ax.tick_params(axis="both", colors=NOTION_TEXT, length=4, labelsize=9)
         ax.grid(color=NOTION_GRID, linestyle="-", linewidth=0.7)
         ax.set_axisbelow(True)
 
-    # --- Plot 1: Vertical Forces ---
+    # 1. Forces
     axs[0].plot(
-        time,
-        l_force,
-        color=COLOR_LEFT,
-        alpha=0.7,
-        linewidth=1.2,
-        label="Left Force (Fy)",
+        time, l_force, color=COLOR_LEFT, alpha=0.8, linewidth=1.2, label="Left Force"
     )
     axs[0].plot(
-        time,
-        r_force,
-        color=COLOR_RIGHT,
-        alpha=0.7,
-        linewidth=1.2,
-        label="Right Force (Fy)",
+        time, r_force, color=COLOR_RIGHT, alpha=0.8, linewidth=1.2, label="Right Force"
     )
-    axs[0].axhline(
-        args.threshold,
-        color=NOTION_TEXT,
-        linestyle="--",
-        linewidth=1.0,
-        label=f"Threshold ({args.threshold} N)",
-    )
-    axs[0].set_ylabel("Force (N)", fontsize=9, fontweight="bold", color=NOTION_TEXT)
+    axs[0].set_ylabel("Force (N)", fontweight="bold")
     axs[0].set_title(
         "1. Vertical Ground Reaction Forces",
-        fontsize=10,
         fontweight="bold",
         color=NOTION_SUBTEXT,
         loc="left",
     )
-    axs[0].legend(
-        loc="upper right",
-        frameon=True,
-        facecolor=NOTION_BG,
-        edgecolor=NOTION_GRID,
-        fontsize=8,
-    )
+    axs[0].legend(loc="upper right")
 
-    # --- Plot 2: Binary Contact States ---
+    # 2. Contact States
+    l_contact = l_force > args.threshold
+    r_contact = r_force > args.threshold
     axs[1].step(
         time,
         l_contact.astype(int) + 0.05,
         where="post",
         color=COLOR_LEFT,
-        linewidth=1.2,
         label="Left Contact",
     )
     axs[1].step(
@@ -312,133 +294,136 @@ def main():
         r_contact.astype(int) - 0.05,
         where="post",
         color=COLOR_RIGHT,
-        linewidth=1.2,
         label="Right Contact",
     )
     axs[1].set_yticks([0, 1])
     axs[1].set_yticklabels(["Off", "On"])
-    axs[1].set_ylim(-0.2, 1.2)
-    axs[1].set_ylabel("Contact", fontsize=9, fontweight="bold", color=NOTION_TEXT)
+    axs[1].set_ylabel("Contact", fontweight="bold")
     axs[1].set_title(
-        "2. Binary Contact States (Force > Threshold)",
-        fontsize=10,
-        fontweight="bold",
-        color=NOTION_SUBTEXT,
-        loc="left",
+        "2. Binary Contact States", fontweight="bold", color=NOTION_SUBTEXT, loc="left"
     )
 
-    # --- Plot 3: Single-Support Active ---
-    axs[2].step(
-        time,
-        l_ss.astype(int) + 0.05,
-        where="post",
-        color=COLOR_LEFT,
-        linewidth=1.2,
-        label="Left Single Support",
-    )
-    axs[2].step(
-        time,
-        r_ss.astype(int) - 0.05,
-        where="post",
-        color=COLOR_RIGHT,
-        linewidth=1.2,
-        label="Right Single Support",
-    )
-    axs[2].set_yticks([0, 1])
-    axs[2].set_yticklabels(["Off", "On"])
-    axs[2].set_ylim(-0.2, 1.2)
-    axs[2].set_ylabel(
-        "Single Support", fontsize=9, fontweight="bold", color=NOTION_TEXT
-    )
-    axs[2].set_title(
-        "3. Single-Support Windows",
-        fontsize=10,
-        fontweight="bold",
-        color=NOTION_SUBTEXT,
-        loc="left",
-    )
-
-    # --- Plot 4: VO2 & VCO2 Profiles (If Present) ---
+    # Metabolics Plots
     if has_metabolics:
-        vo2_vals = df_win[vo2_col].values
-        vco2_vals = df_win[vco2_col].values if vco2_col else None
+        # Extract downsampled updates for visual clarity (like the diagnostic script)
+        updates = np.concatenate(([True], np.abs(vo2_raw[1:] - vo2_raw[:-1]) > 1e-3))
+        t_met = time[updates & presence_mask]
+        v_vo2 = vo2_raw[updates & presence_mask]
+        v_vco2 = vco2_raw[updates & presence_mask]
+        v_rer = rer[updates & presence_mask]
+        v_watts = watts[updates & presence_mask]
 
-        # Mask zero and missing values typical of gas exchange transitions
-        valid_indices = (vo2_vals > 0) & (~np.isnan(vo2_vals))
-        t_met = time[valid_indices]
-        vo2_clean = vo2_vals[valid_indices]
-
-        axs[3].plot(
-            t_met,
-            vo2_clean,
-            color=COLOR_VO2,
-            marker="o",
-            markersize=3,
-            linewidth=1.2,
-            label="VO2 (O2 Consumption)",
+        # 3. Gas Exchange
+        axs[2].plot(
+            t_met, v_vo2, "o-", color=COLOR_VO2, markersize=3, alpha=0.7, label="VO2"
         )
-
-        if vco2_vals is not None:
-            vco2_clean = vco2_vals[valid_indices]
-            axs[3].plot(
-                t_met,
-                vco2_clean,
-                color=COLOR_VCO2,
-                marker="s",
-                markersize=3,
-                linewidth=1.2,
-                label="VCO2 (CO2 Production)",
-            )
-
-        axs[3].set_ylabel(
-            "Rate (mL/min)", fontsize=9, fontweight="bold", color=NOTION_TEXT
+        axs[2].plot(
+            t_met, v_vco2, "s-", color=COLOR_VCO2, markersize=3, alpha=0.7, label="VCO2"
         )
-        axs[3].set_title(
-            "4. Respiratory Gas Exchange (Indirect Calorimetry)",
-            fontsize=10,
+        axs[2].set_ylabel("mL/min", fontweight="bold")
+        axs[2].set_title(
+            "3. Gas Exchange (Zeroes & NaNs dropped)",
             fontweight="bold",
             color=NOTION_SUBTEXT,
             loc="left",
         )
-        axs[3].legend(
-            loc="upper left",
-            frameon=True,
-            facecolor=NOTION_BG,
-            edgecolor=NOTION_GRID,
-            fontsize=8,
+        axs[2].legend(loc="upper right")
+
+        # 4. RER
+        axs[3].plot(
+            t_met, v_rer, "o-", color=COLOR_RER, markersize=3, alpha=0.8, label="RER"
         )
+        axs[3].axhspan(
+            0.72, 1.05, color="#10B981", alpha=0.1, label="Valid Range (0.72 - 1.05)"
+        )
+        axs[3].axhline(1.05, color="red", linestyle="--")
+        axs[3].axhline(0.72, color="red", linestyle="--")
+        axs[3].set_ylabel("RER Ratio", fontweight="bold")
+        axs[3].set_title(
+            "4. Respiratory Exchange Ratio (Spikes invalidate frames)",
+            fontweight="bold",
+            color=NOTION_SUBTEXT,
+            loc="left",
+        )
+        axs[3].legend(loc="upper right")
 
-        # Print baseline averages inside terminal
-        mean_vo2 = np.mean(vo2_clean)
-        mean_vco2 = np.mean(vco2_clean) if vco2_vals is not None else 0.85 * mean_vo2
-        cal_per_min = 3.941 * mean_vo2 + 1.106 * mean_vco2
-        watts = cal_per_min * 4.184 / 60.0
+        # 5. Watts
+        axs[4].plot(
+            t_met,
+            v_watts,
+            "o-",
+            color=COLOR_WATTS,
+            markersize=3,
+            alpha=0.6,
+            label="Gross Watts",
+        )
+        axs[4].axhline(
+            qs_baseline,
+            color="black",
+            linestyle="--",
+            label=f"QS Baseline ({qs_baseline:.1f}W)",
+        )
+        axs[4].axhline(
+            qs_baseline + 30.0, color="red", linestyle=":", label="30W Floor Threshold"
+        )
+        axs[4].set_ylabel("Watts (W)", fontweight="bold")
+        axs[4].set_title(
+            "5. Biological Power (Sub-baseline chunks invalidated)",
+            fontweight="bold",
+            color=NOTION_SUBTEXT,
+            loc="left",
+        )
+        axs[4].legend(loc="upper right")
 
-        print("\nTrial Metabolic Summary Statistics:")
-        print(f"  - Mean VO2  : {mean_vo2:.1f} mL/min")
-        if vco2_col:
-            print(f"  - Mean VCO2 : {mean_vco2:.1f} mL/min")
-        print(f"  - Calculated Gross Biological Cost: {watts:.1f} W")
+    axs[-1].set_xlabel("Time (seconds)", fontweight="bold")
 
-    axs[-1].set_xlabel(
-        "Time (seconds)", fontsize=10, fontweight="bold", color=NOTION_TEXT
-    )
-
-    # Shading the background with the Clean Segment Mask
+    # --- Shade and Segment Backgrounds ---
     for ax in axs:
+        # Green shade for final valid frames
         ax.fill_between(
             time,
             0,
             1,
-            where=mask_win,
+            where=final_valid_mask,
             color=COLOR_CLEAN_BG,
-            alpha=0.3,
+            alpha=0.5,
             transform=ax.get_xaxis_transform(),
-            zorder=1,
         )
 
-    plt.xlim(start_time, end_time)
+        # Vertical segment lines and labels
+        for c_start, c_end, is_valid, label in chunk_status:
+            ax.axvline(c_start, color="black", linestyle="--", alpha=0.7, linewidth=1.5)
+            ax.axvline(c_end, color="black", linestyle="--", alpha=0.7, linewidth=1.5)
+
+            if not is_valid:
+                # Shade invalid chunks light red
+                ax.fill_betweenx(
+                    ax.get_ylim(), c_start, c_end, color=COLOR_INVALID_BG, alpha=0.3
+                )
+
+            # Draw text on the top subplot only
+            if ax == axs[0]:
+                color = "green" if is_valid else "red"
+                status_text = "VALID CHUNK" if is_valid else "INVALID CHUNK"
+                ax.text(
+                    c_start + (c_end - c_start) / 2,
+                    ax.get_ylim()[1] * 0.95,
+                    f"{status_text}\n{label}",
+                    color=color,
+                    ha="center",
+                    va="top",
+                    fontweight="bold",
+                    fontsize=9,
+                    bbox=dict(
+                        facecolor="white",
+                        alpha=0.8,
+                        edgecolor=color,
+                        boxstyle="round,pad=0.2",
+                    ),
+                )
+
     plt.tight_layout()
+    plt.subplots_adjust(top=0.93)
     plt.show()
 
 

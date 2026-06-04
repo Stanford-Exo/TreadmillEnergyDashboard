@@ -34,6 +34,16 @@ NOTION_SUBTEXT = "#787774"
 NOTION_GRID = "#EDEDED"
 
 
+def extract_subject_name(trial_name):
+    """
+    Extracts the clean subject name from the full trial string.
+    Example: 'Continued_Optimization_1_adaptation_Day6_ADAPT1' -> 'Continued Optimization 1'
+    """
+    parts = trial_name.split("_adaptation")
+    subj = parts[0]
+    return subj.replace("_", " ")
+
+
 def compile_regression_deltas(df):
     """
     Groups data by trial, filters outliers, and calculates deltas of each component
@@ -245,7 +255,7 @@ def plot_fitting_results(df_deltas, results):
     Plots Actual vs. Predicted Delta Metabolics alongside estimated coefficients.
     Forces both predicted and actual maximums to be 0 for each trial, scattering down/left.
     """
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6.5), facecolor=NOTION_BG)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 7.5), facecolor=NOTION_BG)
     ax1.set_facecolor(NOTION_BG)
     ax2.set_facecolor(NOTION_BG)
 
@@ -254,7 +264,9 @@ def plot_fitting_results(df_deltas, results):
 
     fig.text(0.04, 0.94, title, fontsize=15, fontweight="bold", color=NOTION_TEXT)
     fig.text(0.04, 0.90, subtitle, fontsize=10.5, color=NOTION_SUBTEXT)
-    plt.subplots_adjust(top=0.82, bottom=0.15, left=0.08, right=0.92, wspace=0.28)
+
+    # Restored classic margins for a balanced, symmetrical dual-panel layout
+    plt.subplots_adjust(top=0.84, bottom=0.15, left=0.08, right=0.92, wspace=0.28)
 
     for ax in [ax1, ax2]:
         for spine in ["top", "right"]:
@@ -271,13 +283,20 @@ def plot_fitting_results(df_deltas, results):
     # Subplot 1: Actual vs. Predicted Delta Metabolics
     # ---------------------------------------------------------
     unique_trials = df_deltas["trial_name"].unique()
-    colormap = cm.get_cmap("tab10", max(len(unique_trials), 10))
+
+    # Extract subjects and map each unique subject to a stable color
+    unique_subjects = sorted(list(set(extract_subject_name(t) for t in unique_trials)))
+    colormap = cm.get_cmap("tab20", max(len(unique_subjects), 20))
+    subject_to_color = {subj: colormap(i) for i, subj in enumerate(unique_subjects)}
 
     all_actual_deltas = []
     all_pred_deltas = []
+    legend_tracker = set()
 
     for i, trial_name in enumerate(unique_trials):
         sub_df = df_deltas[df_deltas["trial_name"] == trial_name].copy()
+        subj_name = extract_subject_name(trial_name)
+        color = subject_to_color[subj_name]
 
         actual_delta = sub_df["delta_bio_w"].values
 
@@ -292,54 +311,25 @@ def plot_fitting_results(df_deltas, results):
         all_actual_deltas.extend(actual_delta)
         all_pred_deltas.extend(pred_delta)
 
+        # De-duplicate legend entries: only label the first trial occurrence of each subject
+        if subj_name not in legend_tracker:
+            label = subj_name
+            legend_tracker.add(subj_name)
+        else:
+            label = None
+
         # Plot centers (slightly smaller, crisp white border)
         ax1.scatter(
             pred_delta,
             actual_delta,
-            color=colormap(i),
+            color=color,
             s=30,
             alpha=0.90,
             edgecolors="white",
             linewidths=0.5,
-            label=trial_name,
+            label=label,
             zorder=4,
         )
-
-        # Plot uncertainty ellipses scaled down to Standard Error of the Mean (SEM)
-        # Using hollow ellipses (facecolor='none') to eliminate color overlaps/mud
-        for idx, (_, row_val) in enumerate(sub_df.iterrows()):
-            pt_pred_delta = pred_delta[idx]
-            pt_actual_delta = actual_delta[idx]
-
-            y_std = row_val["delta_bio_std_w"] if "delta_bio_std_w" in row_val else 0.0
-            x_std = (
-                row_val["delta_mech_std_w"] if "delta_mech_std_w" in row_val else 0.0
-            )
-
-            n_strides = (
-                row_val["num_valid_strides"] if "num_valid_strides" in row_val else 250
-            )
-            if pd.isna(n_strides) or n_strides <= 0:
-                n_strides = 250
-
-            # Approximately 15 breath-by-breath measurements are collected per 5-minute window
-            n_breaths = 15
-
-            x_sem = x_std / np.sqrt(n_strides)
-            y_sem = y_std / np.sqrt(n_breaths)
-
-            ellipse = Ellipse(
-                xy=(pt_pred_delta, pt_actual_delta),
-                width=2 * x_sem,
-                height=2 * y_sem,
-                angle=0,
-                facecolor="none",  # Hollow faces prevent color mud
-                edgecolor=colormap(i),
-                alpha=0.35,  # Legible outline alpha
-                linewidth=0.6,  # Delicate Tufte line weight
-                zorder=3,
-            )
-            ax1.add_patch(ellipse)
 
     # Reference line of perfect correlation: both drop identically
     min_val = min(np.min(all_actual_deltas), np.min(all_pred_deltas))
@@ -374,13 +364,31 @@ def plot_fitting_results(df_deltas, results):
         color=NOTION_TEXT,
         pad=10,
     )
+
+    # Combined Legend: Merge the "Perfect Fit" line and alphabetically sorted subjects into ax1 (upper left)
+    handles1, labels1 = ax1.get_legend_handles_labels()
+    perfect_fit_handle = [h for h, l in zip(handles1, labels1) if "Perfect Fit" in l]
+    perfect_fit_label = [l for l in labels1 if "Perfect Fit" in l]
+
+    subject_handles = [h for h, l in zip(handles1, labels1) if "Perfect Fit" not in l]
+    subject_labels = [l for l in labels1 if "Perfect Fit" not in l]
+
+    # Sort subjects alphabetically
+    sorted_pairs = sorted(zip(subject_labels, subject_handles), key=lambda x: x[0])
+    subject_labels_sorted = [p[0] for p in sorted_pairs]
+    subject_handles_sorted = [p[1] for p in sorted_pairs]
+
+    combined_handles = perfect_fit_handle + subject_handles_sorted
+    combined_labels = perfect_fit_label + subject_labels_sorted
+
     ax1.legend(
+        combined_handles,
+        combined_labels,
+        loc="upper left",
         frameon=True,
         facecolor=NOTION_BG,
         edgecolor=NOTION_GRID,
-        fontsize=7.5,
-        loc="lower left",
-        ncol=2,
+        fontsize=8.0,  # Adjusted slightly smaller to fit vertically in the sparse region
     )
 
     # ---------------------------------------------------------
@@ -470,10 +478,15 @@ def plot_fitting_results(df_deltas, results):
             fontweight="bold",
         )
 
-    ax2.plot(
-        [], [], color="#DC2626", linestyle=":", label="Theoretical Lit Value (4:1:0:0)"
+    # Standalone Internal Legend on ax2 for the Literature Line
+    ax2.legend(
+        [plt.Line2D([0], [0], color="#DC2626", linestyle=":")],
+        ["Theoretical Lit Value (4:1:0:0)"],
+        frameon=False,
+        loc="upper right",
+        fontsize=8,
+        labelcolor=NOTION_TEXT,
     )
-    ax2.legend(frameon=False, loc="upper right", fontsize=8, labelcolor=NOTION_TEXT)
 
     plt.show()
 
