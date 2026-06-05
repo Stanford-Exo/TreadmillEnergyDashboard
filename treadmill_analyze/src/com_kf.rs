@@ -103,6 +103,11 @@ impl ComKalmanFilter {
     pub fn com_velocity(&self) -> Vector3<f64> {
         self.x.fixed_rows::<3>(3).into()
     }
+
+    pub fn com_excursion(&self) -> Vector3<f64> {
+        self.x.fixed_rows::<3>(0).into()
+    }
+
     pub fn mass(&self) -> f64 {
         if self.x[6] == 0.0 {
             f64::INFINITY

@@ -10,6 +10,10 @@ pub struct EnergyAnalyzer {
 pub struct EnergyResult {
     pub power_left: f64,
     pub power_right: f64,
+    pub power_sys_x: f64,
+    pub power_sys_y: f64,
+    pub power_sys_z: f64,
+    pub com_pos: Vector3<f64>,
     pub mass: f64,
 }
 
@@ -62,6 +66,10 @@ impl EnergyAnalyzer {
         EnergyResult {
             power_left: force_l.dot(&v_com_overground),
             power_right: force_r.dot(&v_com_overground),
+            power_sys_x: (force_l.x + force_r.x) * v_com_overground.x,
+            power_sys_y: (force_l.y + force_r.y) * v_com_overground.y,
+            power_sys_z: (force_l.z + force_r.z) * v_com_overground.z,
+            com_pos: self.kf.com_excursion(),
             mass: self.kf.mass(),
         }
     }
